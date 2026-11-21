@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.1
+
+- Make the native Page preview implementation available as an update for the existing Obsidian Community listing. The plugin keeps its existing ID, settings, and same-note bibliography format.
+
 ## 1.0.1
 
 - Explain in the README why Citation Preview uses the current note's bibliography, how it differs from library-backed citation tools and inline annotations, and how it fits AI-assisted note writing.
