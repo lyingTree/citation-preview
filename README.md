@@ -4,9 +4,11 @@ Preview numeric citations in Obsidian using the bibliography already in the same
 
 ## Why Citation Preview?
 
-An Obsidian link has one target. Page preview can show that target, but it cannot use one link to preview several noncontiguous blocks together. A separate block that repeats or embeds every combination of references would add material to maintain. Citation Preview assembles the cited entries in memory so each entry can live once in the note's bibliography.
+An Obsidian link points to a single target. To preview a group such as `[1-10]` or `[3,1-10,12]` whose references live in separate blocks, a native block link would need a dedicated block containing that group. Repeating this for each combination adds material to maintain. [Obsidian block links](https://obsidian.md/help/links)
 
-This format also works with AI-assisted note writing. If you use an assistant to draft or reorganize a note, have it preserve the numeric citations and the matching numbered bibliography. Citation Preview resolves those numbers locally from the Markdown. At runtime it uses no AI, makes no network requests to resolve citations, and creates no helper files or writes to your notes.
+Existing plugins address different workflows. ZotLit draws on a Zotero library, and Citation Suite resolves Pandoc citation keys using Zotero or a separate `.bib` or CSL JSON file. Inline Annotations displays notes attached to selected text. This leaves a gap for readers who want to preview a numeric citation group from the bibliography already in the current Markdown note. [ZotLit](https://github.com/aidenlx/zotlit) · [Citation Suite](https://github.com/pan4ratte/obsidian-citation-suite) · [Inline Annotations](https://github.com/cetrodk/obsidian-inline-annotations)
+
+Citation Preview was built for that workflow. It assembles the cited entries in memory and displays them through Obsidian's native Page preview, so each reference is maintained once in the bibliography. In AI-assisted note writing, the assistant can preserve the original citations and put the numbered references in the same note. Previewing them runs locally, without an AI service, network lookup, helper files, or edits to the note.
 
 ## Quick start
 
@@ -58,12 +60,6 @@ A single linked citation uses Obsidian's normal direct Page preview. A single un
 - The plugin uses numeric Markdown citations and explicitly numbered references in the current note. Author–date citations, general CSL processing, and resolving references from external sources are outside its scope. Citation lookup needs only Obsidian and the current note.
 - Plain numeric recognition is heuristic. A bracketed interval can look like a citation when the note has matching numbered references. Check the heading, explicit numbering, and block targets if a preview is missing.
 - The preview is designed for desktop mouse hover. There is no dedicated touch gesture.
-
-## Related Obsidian plugins
-
-- **ZotLit** brings your Zotero library into Obsidian so you can browse sources, read and annotate PDFs, and create literature notes. [ZotLit repository](https://github.com/aidenlx/zotlit)
-- **Citation Suite** uses Pandoc citation keys, with sources from Zotero or a `.bib` or CSL JSON file in the vault. [Citation Suite repository](https://github.com/pan4ratte/obsidian-citation-suite)
-- **Inline Annotations** attaches short inline notes to selected text and reveals them on click or hover. [Inline Annotations repository](https://github.com/cetrodk/obsidian-inline-annotations)
 
 ## Install or update
 

@@ -1,7 +1,7 @@
 {
   "id": "citation-range-preview",
   "name": "Citation Preview",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "minAppVersion": "1.15.1",
   "description": "Preview numeric citation groups in Page preview using the numbered bibliography in the same note.",
   "author": "Chuangwu Deng",

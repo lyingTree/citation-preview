@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.1
+
+- Explain in the README why Citation Preview uses the current note's bibliography, how it differs from library-backed citation tools and inline annotations, and how it fits AI-assisted note writing.
+
 ## 1.0.0
 
 - Use Obsidian Page preview for numeric citation groups, with typography and numbered lists matching standard block previews.
