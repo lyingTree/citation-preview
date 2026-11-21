@@ -1,0 +1,147 @@
+name: Release plugin
+
+on:
+  push:
+    tags:
+      - '*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag matching manifest.json, for example 1.0.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Verify release identity
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const manifest = JSON.parse(readFileSync('manifest.json', 'utf8'));
+          const packageJson = JSON.parse(readFileSync('package.json', 'utf8'));
+          const tag = process.env.RELEASE_TAG;
+          if (!tag || !/^\d+\.\d+\.\d+$/.test(tag)) {
+            throw new Error('Release tags must have the form x.y.z, with no v prefix.');
+          }
+          if (manifest.version !== tag || packageJson.version !== tag) {
+            throw new Error('Tag, manifest version, and package version must match.');
+          }
+          if (manifest.id !== 'citation-range-preview') {
+            throw new Error('Unexpected plugin identifier.');
+          }
+          NODE
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Build, test, and lint
+        run: npm run check
+
+      - name: Package the plugin
+        run: npm run package
+
+      - name: Prepare release notes
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          const tag = process.env.RELEASE_TAG;
+          const changelog = readFileSync('CHANGELOG.md', 'utf8');
+          const heading = `## ${tag}\n`;
+          const start = changelog.indexOf(heading);
+          if (start < 0) throw new Error(`Missing changelog entry for ${tag}.`);
+          const remainder = changelog.slice(start + heading.length);
+          const next = remainder.indexOf('\n## ');
+          const changes = (next < 0 ? remainder : remainder.slice(0, next)).trim();
+          const text = [
+            `# Citation Preview ${tag}`,
+            '',
+            'Hover over numeric citations such as [1-10] or [3,1-10,12] to view the corresponding references together in Obsidian Page preview. Citation groups are assembled in memory from the numbered bibliography in the same note.',
+            '',
+            'A consistent citation and bibliography format is required. References must be explicitly numbered, unique, and listed under a supported bibliography heading in the same note. See README.md for the exact format and linked-citation examples.',
+            '',
+            '## Changes',
+            '',
+            changes,
+            '',
+            '## Installation',
+            '',
+            `Extract citation-preview-${tag}.zip into the plugins directory of your vault configuration. Keep the internal folder name citation-range-preview, then enable Citation Preview in Community plugins.`,
+            '',
+            'Existing installations should replace main.js, manifest.json, and styles.css in the same plugin folder, then reload the plugin. The internal identifier remains citation-range-preview to preserve settings and update continuity.',
+            '',
+            'This release was built from the matching Git tag after the production build, automated tests, and lint checks completed successfully.',
+            '',
+            'See README.md and CHANGELOG.md for supported formats, usage, and limitations. GitHub publication does not imply acceptance into the Obsidian community directory.',
+            ''
+          ].join('\n');
+          writeFileSync(join(process.env.RUNNER_TEMP, 'citation-preview-release.md'), text);
+          NODE
+
+      - name: Publish verified release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          archive="dist/citation-preview-$RELEASE_TAG.zip"
+          notes="$RUNNER_TEMP/citation-preview-release.md"
+          test -f "$archive"
+          if existing_draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' 2>/dev/null); then
+            if [ "$existing_draft" != "true" ]; then
+              published_dir=$(mktemp -d "$RUNNER_TEMP/citation-preview-release.XXXXXX")
+              trap 'rm -rf -- "$published_dir"' EXIT
+              if ! gh release download "$RELEASE_TAG" --dir "$published_dir" \
+                --pattern main.js --pattern manifest.json --pattern styles.css \
+                --pattern "${archive##*/}"; then
+                echo "::error::Could not download all four required assets from published release $RELEASE_TAG. Published assets were not changed." >&2
+                exit 1
+              fi
+              for local_asset in main.js manifest.json styles.css "$archive"; do
+                asset_name="${local_asset##*/}"
+                published_asset="$published_dir/$asset_name"
+                if [ ! -f "$published_asset" ]; then
+                  echo "::error::Published release $RELEASE_TAG is missing $asset_name. Published assets were not changed." >&2
+                  exit 1
+                fi
+                if ! cmp -s -- "$local_asset" "$published_asset"; then
+                  echo "::error::Published asset $asset_name differs from the current build for $RELEASE_TAG. Create a new version instead of replacing released assets." >&2
+                  exit 1
+                fi
+              done
+              echo "::notice::Published release $RELEASE_TAG already contains the same four verified assets. No changes were made."
+              exit 0
+            fi
+          else
+            gh release create "$RELEASE_TAG" --draft --verify-tag --title "Citation Preview $RELEASE_TAG" --notes-file "$notes"
+          fi
+          gh release upload "$RELEASE_TAG" main.js manifest.json styles.css "$archive" --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --latest --title "Citation Preview $RELEASE_TAG" --notes-file "$notes"

@@ -1,0 +1,13 @@
+.crp-citation,
+.crp-editor-citation {
+  cursor: help;
+}
+
+.crp-citation:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+
+.crp-native-preview > .markdown-embed-link {
+  display: none;
+}
