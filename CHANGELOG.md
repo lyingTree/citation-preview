@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.0
+
+- Display resolved citations as blue links, including their outer brackets and separators, with an option to use the current theme's link color. Keep existing links and native single-reference previews; add navigation for resolved plain-text citation numbers without rewriting the note.
+- Keep editor syntax and link destinations in their normal colors. Ordinary editor clicks still place the cursor; modified clicks navigate to the corresponding reference.
+- Show an explicitly linked citation group such as `[1-5](#^ref-1)` in one preview with the specified reference first, a horizontal rule, and the full expanded group below. Preserve the existing link's click target.
+- Recognize nearby numbered reference lists for plain numeric citations, including lists without block anchors. Prefer the same structural section, then the nearest detected list; report missing entries there instead of borrowing from another list. Exact `ref` and `sref` links continue to use their actual anchors independently of bibliography headings.
+- Add the manually invoked **Add missing reference anchors** command. It adds missing block IDs to recognized reference entries in the current note, keeps existing IDs, avoids collisions, and applies edits as one undoable editor transaction. Normal previewing and navigation do not write to the note.
+- Add regression coverage for list selection, anchor insertion, visible citation ranges, link preservation, grouped previews, and editor interactions. Keep the plugin ID `citation-range-preview` and minimum Obsidian version `1.15.1`.
+
 ## 1.2.0
 
 - Identify references directly from their `^ref-N` and `^sref-N` block IDs, without requiring a bibliography heading. References work under arbitrary headings or with no heading, including notes whose headings contain section numbers or entry counts.

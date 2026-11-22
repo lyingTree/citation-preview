@@ -1,16 +1,19 @@
 import { ignoredMarkdownRanges } from './bibliography';
 import { localLinkAnchor } from './links';
+import { headingPathAt, nearestReferenceList } from './reference-lists';
 import type { CitationGroup, ParseOptions, ReferenceIndex } from './types';
 
 interface NumberToken {
   number: number;
+  from: number;
+  labelTo: number;
   to: number;
   linked: boolean;
   valid: boolean;
   scopeId?: string;
   target?: string;
 }
-interface Parts { tokens: NumberToken[]; separators: string[]; to: number }
+interface Parts { tokens: NumberToken[]; separators: string[]; separatorRanges: Array<{ from: number; to: number }>; to: number }
 
 function positiveInteger(text: string): number | undefined {
   if (!/^[1-9]\d{0,8}$/.test(text)) return undefined;
@@ -18,13 +21,13 @@ function positiveInteger(text: string): number | undefined {
   return Number.isSafeInteger(value) ? value : undefined;
 }
 
-function localReferenceLink(target: string, number: number, index: ReferenceIndex, sourcePath?: string): Pick<NumberToken, 'valid' | 'scopeId' | 'target'> {
+function localReferenceLink(target: string, number: number | undefined, index: ReferenceIndex, sourcePath?: string): Pick<NumberToken, 'valid' | 'scopeId' | 'target'> {
   const anchor = localLinkAnchor(target, sourcePath);
   if (!anchor || index.duplicateAnchors.has(anchor)) return { valid: false };
   const entry = index.anchors.get(anchor);
   // A plausible suffix is not evidence that a link points to a bibliography entry.
   // Exact anchors also support supplementary and user-defined naming conventions.
-  if (!entry || entry.number !== number) return { valid: false };
+  if (!entry || (number !== undefined && entry.number !== number)) return { valid: false };
   return { valid: true, scopeId: entry.sectionId, target: anchor };
 }
 
@@ -63,18 +66,19 @@ function readToken(source: string, from: number, index: ReferenceIndex, options:
     if (divider < 0) return undefined;
     const number = positiveInteger(body.slice(divider + 1).trim());
     if (!number) return undefined;
-    return { number, to: end + 2, linked: true, ...localReferenceLink(body.slice(0, divider), number, index, options.sourcePath) };
+    const labelFrom = from + 2 + divider + 1 + (body.slice(divider + 1).match(/^\s*/)?.[0].length ?? 0);
+    return { number, from: labelFrom, labelTo: labelFrom + String(number).length, to: end + 2, linked: true, ...localReferenceLink(body.slice(0, divider), number, index, options.sourcePath) };
   }
   const linkLabel = /^\[([1-9]\d{0,8})\]/.exec(source.slice(from, from + 12));
   if (linkLabel) {
     const destination = destinationAt(source, from + linkLabel[0].length);
     if (!destination) return undefined;
     const number = Number(linkLabel[1]);
-    return { number, to: destination.to, linked: true, ...localReferenceLink(destination.target, number, index, options.sourcePath) };
+    return { number, from: from + 1, labelTo: from + 1 + linkLabel[1].length, to: destination.to, linked: true, ...localReferenceLink(destination.target, number, index, options.sourcePath) };
   }
   const digits = /^[1-9]\d{0,8}/.exec(source.slice(from, from + 10));
   if (!digits || /\d/.test(source[from + digits[0].length] ?? '')) return undefined;
-  return { number: Number(digits[0]), to: from + digits[0].length, linked: false, valid: true };
+  return { number: Number(digits[0]), from, labelTo: from + digits[0].length, to: from + digits[0].length, linked: false, valid: true };
 }
 
 function skipSpace(source: string, from: number): number {
@@ -86,6 +90,7 @@ function skipSpace(source: string, from: number): number {
 function readParts(source: string, from: number, index: ReferenceIndex, options: ParseOptions): Parts | undefined {
   const tokens: NumberToken[] = [];
   const separators: string[] = [];
+  const separatorRanges: Array<{ from: number; to: number }> = [];
   let p = skipSpace(source, from);
   for (let count = 0; count <= options.maxReferences * 2; count += 1) {
     const token = readToken(source, p, index, options);
@@ -93,8 +98,9 @@ function readParts(source: string, from: number, index: ReferenceIndex, options:
     tokens.push(token);
     p = skipSpace(source, token.to);
     const separator = source[p];
-    if (!separator || !/[-–—−－,，;；、]/.test(separator)) return { tokens, separators, to: p };
+    if (!separator || !/[-–—−－,，;；、]/.test(separator)) return { tokens, separators, separatorRanges, to: p };
     separators.push(separator);
+    separatorRanges.push({ from: p, to: p + 1 });
     p = skipSpace(source, p + 1);
   }
   return undefined;
@@ -124,29 +130,39 @@ function expand(parts: Parts, cap: number): number[] | undefined {
   return values;
 }
 
-function groupFromParts(parts: Parts, from: number, to: number, index: ReferenceIndex, options: ParseOptions, outerLink = false): CitationGroup | undefined {
+function groupFromParts(parts: Parts, from: number, to: number, index: ReferenceIndex, options: ParseOptions, outerLinkTarget?: string): CitationGroup | undefined {
   if (parts.tokens.some(token => !token.valid)) return undefined;
-  const linked = outerLink || parts.tokens.some(token => token.linked);
+  const linked = outerLinkTarget !== undefined || parts.tokens.some(token => token.linked);
   if (!linked && !options.recognizePlainText) return undefined;
   const numbers = expand(parts, options.maxReferences);
   if (!numbers?.length) return undefined;
-  // At least one indexed endpoint is evidence; absent intermediate entries are shown as missing.
-  if (!parts.tokens.some(token => index.entries.has(token.number) || index.duplicates.has(token.number))) return undefined;
   const scopes = new Set(parts.tokens.flatMap(token => token.scopeId ? [token.scopeId] : []));
   // A range has no defined intermediate entries when its endpoints belong to different bibliographies.
   if (scopes.size > 1) return undefined;
   let scopeId = scopes.values().next().value;
   let ambiguousScope = false;
   if (!scopeId) {
-    const endpoints = parts.tokens.filter(token => index.entries.has(token.number) || index.duplicates.has(token.number));
-    const candidates = index.sections.filter(section => endpoints.every(token => section.entries.has(token.number) || section.duplicates.has(token.number)));
-    if (!candidates.length) return undefined;
-    if (candidates.length === 1) scopeId = candidates[0].id;
-    else ambiguousScope = true;
+    const nearest = !linked && index.lists?.length
+      ? nearestReferenceList(index.lists, from, to, headingPathAt(index.headingScopes ?? [], from)) : undefined;
+    if (nearest) {
+      if (!parts.tokens.some(token => nearest.entries.has(token.number) || nearest.duplicates.has(token.number))) return undefined;
+      scopeId = nearest.id;
+    } else {
+      const endpoints = parts.tokens.filter(token => index.entries.has(token.number) || index.duplicates.has(token.number));
+      if (!endpoints.length) return undefined;
+      const candidates = index.sections.filter(section => endpoints.every(token => section.entries.has(token.number) || section.duplicates.has(token.number)));
+      if (!candidates.length) return undefined;
+      if (candidates.length === 1) scopeId = candidates[0].id;
+      else ambiguousScope = true;
+    }
   }
   const label = `[${parts.tokens.map((token, i) => `${token.number}${parts.separators[i] ? (/[-–—−－]/.test(parts.separators[i]) ? '–' : ', ') : ''}`).join('')}]`;
   return { from, to, label, numbers, linked, scopeId, ambiguousScope,
-    linkTargets: parts.tokens.flatMap(token => token.target ? [token.target] : []) };
+    linkTargets: parts.tokens.flatMap(token => token.target ? [token.target] : []), outerLinkTarget,
+    tokens: parts.tokens.map(token => ({ number: token.number, from: token.from, to: token.labelTo,
+      linked: !!outerLinkTarget || token.linked, target: outerLinkTarget ?? token.target })),
+    visibleRanges: [...parts.tokens.map(token => ({ from: token.from, to: token.labelTo })), ...parts.separatorRanges]
+      .sort((left, right) => left.from - right.from) };
 }
 
 function bracketGroup(source: string, from: number, index: ReferenceIndex, options: ParseOptions): CitationGroup | undefined {
@@ -155,21 +171,27 @@ function bracketGroup(source: string, from: number, index: ReferenceIndex, optio
   const parts = readParts(source, from + (escapedOpen ? 2 : 1), index, options);
   if (!parts) return undefined;
   let to = parts.to;
+  const closeFrom = to + (source.startsWith('\\]', to) ? 1 : 0);
   if (source.startsWith('\\]', to)) to += 2;
   else if (source[to] === ']') to += 1;
   else return undefined;
   if (source[to] === '[') return undefined; // Markdown reference-style links are not numeric citations.
-  let outerLink = false;
+  let outerLinkTarget: string | undefined;
   if (source[to] === '(') {
     const destination = destinationAt(source, to);
     if (!destination) return undefined;
-    const resolution = localReferenceLink(destination.target, parts.tokens[0].number, index, options.sourcePath);
+    const resolution = localReferenceLink(destination.target, parts.tokens.length > 1 ? undefined : parts.tokens[0].number, index, options.sourcePath);
     if (!resolution.valid) return undefined;
     parts.tokens[0] = { ...parts.tokens[0], ...resolution, linked: true };
-    outerLink = true;
+    outerLinkTarget = resolution.target;
     to = destination.to;
   }
-  return groupFromParts(parts, from, to, index, options, outerLink);
+  const group = groupFromParts(parts, from, to, index, options, outerLinkTarget);
+  if (group && !outerLinkTarget) {
+    group.visibleRanges!.unshift({ from: from + (escapedOpen ? 1 : 0), to: from + (escapedOpen ? 2 : 1) });
+    group.visibleRanges!.push({ from: closeFrom, to: closeFrom + 1 });
+  }
+  return group;
 }
 
 function unbracketedLinks(source: string, from: number, index: ReferenceIndex, options: ParseOptions): CitationGroup | undefined {
@@ -184,10 +206,10 @@ function maskRange(chars: string[], from: number, to: number): void {
 
 /** Used in editor mode and reading-mode tests; all offsets refer to the raw source. */
 export function findCitationGroups(source: string, index: ReferenceIndex, options: ParseOptions, ignored = ignoredMarkdownRanges(source)): CitationGroup[] {
-  if ((!index.entries.size && !index.duplicates.size) || !Number.isFinite(options.maxReferences) || options.maxReferences < 1) return [];
+  if ((!index.entries.size && !index.duplicates.size && !index.lists?.length) || !Number.isFinite(options.maxReferences) || options.maxReferences < 1) return [];
   const boundedOptions = { ...options, maxReferences: Math.min(1000, Math.floor(options.maxReferences)) };
   const chars = source.split('');
-  for (const range of [...ignored, ...index.referenceRanges]) maskRange(chars, range.from, range.to);
+  for (const range of [...ignored, ...index.referenceRanges, ...(index.lists?.flatMap(list => list.items) ?? [])]) maskRange(chars, range.from, range.to);
   // A Markdown link can wrap its destination in angle brackets, including local block links.
   // Preserve those destinations while masking HTML attributes and raw code containers.
   const markup = /\]\([ \t]*<[^<>\r\n]*>(?=[ \t]*(?:\)|["'(]))|<(pre|code|script|style)\b[^>]*>[\s\S]*?<\/\1\s*>|<[^>\n]*>/gi;
@@ -223,6 +245,12 @@ export function findCitationGroups(source: string, index: ReferenceIndex, option
       const chain = readParts(visibleSource, p, index, boundedOptions);
       if (chain && chain.tokens.length > 1 && chain.tokens.every(token => token.linked)) {
         const group = unbracketedLinks(visibleSource, p, index, boundedOptions);
+        if (group) groups.push(group);
+        p = chain.to;
+        continue;
+      }
+      if (chain?.tokens.length === 1 && visibleSource.startsWith('[[', p)) {
+        const group = groupFromParts(chain, p, chain.to, index, boundedOptions);
         if (group) groups.push(group);
         p = chain.to;
         continue;

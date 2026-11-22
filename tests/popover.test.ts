@@ -100,6 +100,25 @@ describe('native Page preview Markdown embed', () => {
     expect(render).not.toHaveBeenCalled();
   });
 
+  it('keeps both whole-link results and their separator when Markdown rendering fails', async () => {
+    const { owner, previewEl, factories, file } = setup();
+    vi.spyOn(MarkdownRenderer, 'render').mockRejectedValue(new Error('Renderer unavailable'));
+    const result = factories.md({ state: requestPreview(owner, file.path, {
+      ...preview,
+      sections: [
+        { title: 'Linked reference', markdown: '1. First', entries: ['First'], numbers: [1] },
+        { title: 'Citation group', markdown: '1. First\n1. Second', entries: ['First', 'Second'], numbers: [1, 2] }
+      ]
+    }) }, file, '^ref-1');
+    await result.loadFile();
+    expect(previewEl.querySelectorAll('.el-ol > ol')).toHaveLength(2);
+    expect(previewEl.querySelectorAll('hr')).toHaveLength(1);
+    expect(Array.from(previewEl.querySelectorAll('li'), item => [item.value, item.textContent])).toEqual([[1, 'First'], [1, 'First'], [2, 'Second']]);
+    await result.loadFile();
+    expect(previewEl.querySelectorAll('.crp-native-content')).toHaveLength(1);
+    expect(previewEl.querySelectorAll('hr')).toHaveLength(1);
+  });
+
   it('uses the host loader when the preview renderer is unavailable', async () => {
     const { owner, embed, factories, file } = setup();
     const originalLoad = embed.loadFile;

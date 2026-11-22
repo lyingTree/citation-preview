@@ -129,7 +129,7 @@ export function ignoredMarkdownRanges(source: string, lines = sourceLines(source
 }
 
 /** Only explicit reference block IDs establish a bibliography namespace. */
-function referenceAnchor(id: string): { number: number; namespace: string } | undefined {
+export function referenceAnchor(id: string): { number: number; namespace: string } | undefined {
   const match = /^(s?ref)-?([1-9]\d{0,8})$/i.exec(id)
     ?? /^((?:s?ref)(?:-[A-Za-z][A-Za-z0-9]*)+)-([1-9]\d{0,8})$/i.exec(id);
   if (!match) return undefined;

@@ -17,8 +17,7 @@ function parse(body: string, entries = references): CitationDocument {
 }
 
 function texts(model: CitationDocument, group: CitationGroup): Array<string | undefined> {
-  const scope = model.references.sections.find(section => section.id === group.scopeId);
-  return group.numbers.map(number => scope?.entries.get(number)?.markdown);
+  return group.numbers.map(number => model.reference(group, number)?.markdown);
 }
 
 describe('anchor namespaces without bibliography headings', () => {
@@ -74,17 +73,18 @@ describe('anchor namespaces without bibliography headings', () => {
     ]) expect(parse(body).groups).toEqual([]);
   });
 
-  it('marks plain citations ambiguous when multiple namespaces contain their endpoints', () => {
+  it('selects the nearest physical bibliography for plain citations with repeated main/supplement numbers', () => {
     const model = parse('An unlinked interval [1–3].');
     expect(model.groups).toHaveLength(1);
-    expect(model.groups[0].ambiguousScope).toBe(true);
-    expect(model.groups[0].scopeId).toBeUndefined();
+    expect(model.groups[0].ambiguousScope).toBe(false);
+    expect(model.groups[0].scopeId).toMatch(/^list:/);
+    expect(texts(model, model.groups[0])).toEqual(['Main first.', 'Main second.', 'Main third.']);
   });
 
-  it('selects a plain citation namespace only with unique number evidence', () => {
+  it('does not fetch a missing plain-citation number from a distant reference block', () => {
     const model = parse('Unlinked [1, 4].', references + '\n\n4. Main fourth. ^ref-4');
-    expect(model.groups[0].scopeId).toBe('ref');
-    expect(texts(model, model.groups[0])).toEqual(['Main first.', 'Main fourth.']);
+    expect(model.groups[0].scopeId).toMatch(/^list:/);
+    expect(texts(model, model.groups[0])).toEqual(['Main first.', undefined]);
   });
 
   it('does not create references from a heading or unanchored numbered prose', () => {

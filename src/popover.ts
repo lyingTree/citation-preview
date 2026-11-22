@@ -1,10 +1,16 @@
 import { MarkdownRenderer, type App, type Component } from 'obsidian';
 
-export interface GroupPreview {
-  linktext: string;
+export interface PreviewSection {
+  title?: string;
   markdown: string;
   entries: readonly string[];
   numbers: readonly number[];
+}
+
+export interface GroupPreview extends PreviewSection {
+  linktext: string;
+  /** Explicit whole-group links retain their own result above the expanded group. */
+  sections?: readonly PreviewSection[];
 }
 
 export interface NativeHoverParent {
@@ -58,22 +64,29 @@ export function installPreviewContent(app: App, owner: Component): boolean {
     embed.loadFile = async () => {
       embed.editable = false;
       embed.requestEdit = () => {};
+      // The host may ask the same embed to load again after layout changes.
+      previewView.querySelectorAll(':scope > .crp-native-content').forEach(content => content.remove());
       // The native virtualized sizer only renders indexed file sections.
       const section = previewView.createDiv({ cls: 'markdown-preview-sizer markdown-preview-section crp-native-content' });
-      const content = section.createDiv({ cls: 'el-ol' });
-      const { markdown, entries, numbers } = request.preview;
-      try {
-        await MarkdownRenderer.render(app, markdown, content, request.path, embed);
-      } catch {
-        content.replaceChildren();
+      const blocks = request.preview.sections ?? [request.preview];
+      for (const [index, block] of blocks.entries()) {
+        if (index) section.createEl('hr', { cls: 'crp-preview-divider' });
+        if (block.title) section.createEl('h4', { text: block.title, cls: 'crp-preview-heading' });
+        const content = section.createDiv({ cls: 'el-ol' });
+        const { markdown, entries, numbers } = block;
+        try {
+          await MarkdownRenderer.render(app, markdown, content, request.path, embed);
+        } catch {
+          content.replaceChildren();
+        }
+        let list = content.querySelector<HTMLOListElement>(':scope > ol');
+        if (!list || list.children.length !== numbers.length) {
+          content.replaceChildren();
+          list = content.createEl('ol');
+          for (const entry of entries) list.createEl('li', { text: entry });
+        }
+        list.querySelectorAll<HTMLLIElement>(':scope > li').forEach((item, itemIndex) => { item.value = numbers[itemIndex]; });
       }
-      let list = content.querySelector<HTMLOListElement>(':scope > ol');
-      if (!list || list.children.length !== numbers.length) {
-        content.replaceChildren();
-        list = content.createEl('ol');
-        for (const entry of entries) list.createEl('li', { text: entry });
-      }
-      list.querySelectorAll<HTMLLIElement>(':scope > li').forEach((item, index) => { item.value = numbers[index]; });
     };
     return embed;
   }
