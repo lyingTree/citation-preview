@@ -1,4 +1,5 @@
 import type { CitationGroup } from './types';
+import { localLinkAnchor } from './links';
 
 export interface ReadingTrigger {
   element: HTMLElement;
@@ -115,23 +116,9 @@ function candidates(run: TextRun): Candidate[] {
   return result.sort((left, right) => left.from - right.from);
 }
 
-function normalizeNotePath(path: string): string {
-  return path.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\.md$/i, '');
-}
-
-function isLocalReferenceLink(anchor: HTMLAnchorElement, sourcePath?: string): boolean {
+function referenceAnchor(anchor: HTMLAnchorElement, sourcePath?: string): string | undefined {
   const target = anchor.getAttribute('data-href') ?? anchor.getAttribute('href') ?? '';
-  if (!target || /^[a-z][a-z\d+.-]*:/i.test(target) || target.startsWith('//')) return false;
-  const hash = target.indexOf('#');
-  if (hash < 0 || hash === target.length - 1) return false;
-  const path = target.slice(0, hash);
-  if (!path) return true;
-  if (!sourcePath) return false;
-  let decoded = path;
-  try { decoded = decodeURIComponent(path); } catch { return false; }
-  const normalized = normalizeNotePath(decoded);
-  const current = normalizeNotePath(sourcePath);
-  return normalized === current || (!normalized.includes('/') && normalized === current.split('/').pop());
+  return localLinkAnchor(target, sourcePath);
 }
 
 function candidateLinks(candidate: Candidate): Set<HTMLAnchorElement> {
@@ -200,8 +187,15 @@ export function decorateReadingCitations(
       const bucket = available.get(candidate.key);
       if (!bucket?.length) continue;
       const links = candidateLinks(candidate);
-      const localLinks = links.size > 0 && Array.from(links).every(link => isLocalReferenceLink(link, options.sourcePath));
-      const match = bucket.findIndex(group => group.linked ? localLinks : candidate.bracketed && links.size === 0);
+      const targets = Array.from(links, link => referenceAnchor(link, options.sourcePath));
+      const localLinks = targets.length > 0 && targets.every(target => target !== undefined);
+      const match = bucket.findIndex(group => {
+        if (!group.linked) return candidate.bracketed && links.size === 0;
+        if (!localLinks) return false;
+        if (!group.linkTargets) return true;
+        return group.linkTargets.length === targets.length
+          && group.linkTargets.every((target, index) => target === targets[index]);
+      });
       if (match < 0) continue;
       const group = bucket.splice(match, 1)[0];
       plans.push({ candidate, group });

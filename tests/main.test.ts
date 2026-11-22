@@ -30,6 +30,9 @@ interface HoverLink {
 
 const bibliography = '## References\n[1] Original first. ^ref-1\n[2] Second reference. ^ref-2\n[3] Third reference. ^ref-3';
 const source = `First [1, 3].\n\nSecond [2–3].\n\n${bibliography}`;
+const multipleBibliographies = String.raw`Main \[[1](<#^ref-1>)–[2](<#^ref-2>)\], supplementary \[[1](<#^sref-1>)–[2](<#^sref-2>)\].`
+  + '\n\n## 6 参考文献（2条）\n1. Main first. ^ref-1\n2. Main second. ^ref-2'
+  + '\n\n## 7 Supplement\n### 7.7 补充参考文献（2条）\n1. Supplement first. ^sref-1\n2. Supplement second. ^sref-2';
 const manifest: PluginManifest = {
   id: 'citation-range-preview', name: 'Citation Preview', version: '1.1.0',
   minAppVersion: '1.8.0', description: 'Test manifest.', author: 'Test', isDesktopOnly: false
@@ -109,6 +112,24 @@ function mouseover(target: HTMLElement, options?: MouseEventInit): MouseEvent {
   return event;
 }
 
+function independentlyNumberedCitations(): HTMLElement {
+  const paragraph = document.createElement('p');
+  for (const [label, prefix] of [['Main', 'ref'], ['supplementary', 'sref']]) {
+    paragraph.append(`${label} `);
+    const sup = paragraph.appendChild(document.createElement('sup'));
+    sup.append('[');
+    for (const number of [1, 2]) {
+      if (number > 1) sup.append('–');
+      const link = sup.appendChild(document.createElement('a'));
+      link.setAttribute('href', `#^${prefix}-${number}`);
+      link.textContent = String(number);
+    }
+    sup.append(']');
+    paragraph.append(' ');
+  }
+  return paragraph;
+}
+
 beforeEach(() => installTestDomMethods(document));
 afterEach(() => {
   for (const plugin of plugins.splice(0)) plugin.unload();
@@ -147,6 +168,109 @@ describe('native Page preview host integration', () => {
     expect(anchor(paragraph)).toBe(target);
     mouseover(target);
     expect((await render()).textContent).toContain('Saved replacement.');
+  });
+
+  it('keeps equal visible citation ranges in separate bibliography scopes and preview caches', async () => {
+    const { plugin, process, render, trigger, file } = await setup(multipleBibliographies);
+    const paragraph = await process(independentlyNumberedCitations());
+    const targets = Array.from(paragraph.querySelectorAll<HTMLElement>('.crp-citation'));
+    expect(targets.map(target => target.textContent)).toEqual(['[1–2]', '[1–2]']);
+
+    for (const index of [0, 1, 0, 1]) {
+      mouseover(targets[index]);
+      const prefix = index === 0 ? 'Main' : 'Supplement';
+      expect(Array.from((await render()).querySelectorAll('li'), item => [item.value, item.textContent])).toEqual([
+        [1, `${prefix} first.`], [2, `${prefix} second.`]
+      ]);
+      expect(trigger.mock.lastCall?.[1].linktext).toBe(index === 0 ? '#^ref-1' : '#^sref-1');
+    }
+    expect(plugin.parse(multipleBibliographies, file.path).previewGroups.size).toBe(2);
+  });
+
+  it('refreshes independently numbered bibliographies without rebinding equal labels to another scope', async () => {
+    const { process, render, metadataEvents, file } = await setup(multipleBibliographies);
+    const paragraph = await process(independentlyNumberedCitations());
+    const targets = Array.from(paragraph.querySelectorAll<HTMLElement>('.crp-citation'));
+    expect(targets).toHaveLength(2);
+    for (const target of targets) mouseover(target);
+
+    const revised = multipleBibliographies.replace('Main first.', 'Revised main first entry.')
+      .replace('Supplement first.', 'Revised supplementary first entry.');
+    metadataEvents.emit('changed', file, revised);
+    expect(Array.from(paragraph.querySelectorAll('.crp-citation'))).toEqual(targets);
+    for (const index of [1, 0]) {
+      mouseover(targets[index]);
+      const entries = Array.from((await render()).querySelectorAll('li'), item => item.textContent);
+      expect(entries).toEqual(index === 0
+        ? ['Revised main first entry.', 'Main second.']
+        : ['Revised supplementary first entry.', 'Supplement second.']);
+    }
+  });
+
+  it('keeps reading targets valid when reference namespaces move and change order across arbitrary headings', async () => {
+    const { process, render, trigger, metadataEvents, file } = await setup(multipleBibliographies);
+    const paragraph = await process(independentlyNumberedCitations());
+    const targets = Array.from(paragraph.querySelectorAll<HTMLElement>('.crp-citation'));
+    expect(targets).toHaveLength(2);
+    const revised = multipleBibliographies.split('\n')[0]
+      + '\n\n## Any title\n2. Supplement second. ^sref-2'
+      + '\n\n1. Main first moved. ^ref-1'
+      + '\n\n### Another title\n1. Supplement first moved. ^sref-1'
+      + '\n\n2. Main second. ^ref-2';
+    metadataEvents.emit('changed', file, revised);
+    expect(Array.from(paragraph.querySelectorAll('.crp-citation'))).toEqual(targets);
+
+    for (const index of [0, 1]) {
+      trigger.mockClear();
+      mouseover(targets[index]);
+      expect(trigger).toHaveBeenCalledOnce();
+      expect(Array.from((await render()).querySelectorAll('li'), item => item.textContent)).toEqual(index === 0
+        ? ['Main first moved.', 'Main second.']
+        : ['Supplement first moved.', 'Supplement second.']);
+    }
+  });
+
+  it.each(['removed', 'renamed'])('disables a stale reading target after its anchors are %s without borrowing another namespace', async change => {
+    const { process, render, trigger, metadataEvents, file } = await setup(multipleBibliographies);
+    const paragraph = await process(independentlyNumberedCitations());
+    const targets = Array.from(paragraph.querySelectorAll<HTMLElement>('.crp-citation'));
+    expect(targets).toHaveLength(2);
+    const revised = change === 'renamed' ? multipleBibliographies.replace(/\^ref-/g, '^ref-renamed-')
+      : multipleBibliographies.replace('1. Main first. ^ref-1', '1. Removed main first.')
+        .replace('2. Main second. ^ref-2', '2. Removed main second.');
+    metadataEvents.emit('changed', file, revised);
+
+    trigger.mockClear();
+    mouseover(targets[0]);
+    expect(trigger).not.toHaveBeenCalled();
+    mouseover(targets[1]);
+    expect(trigger).toHaveBeenCalledOnce();
+    expect(Array.from((await render()).querySelectorAll('li'), item => item.textContent)).toEqual([
+      'Supplement first.', 'Supplement second.'
+    ]);
+  });
+
+  it('uses the same scoped reference lookup for editor hovers', async () => {
+    const { plugin, file, render } = await setup(multipleBibliographies);
+    const model = plugin.parse(multipleBibliographies, file.path);
+    const target = document.createElement('span');
+    expect(model.groups).toHaveLength(2);
+    for (const index of [1, 0]) {
+      plugin.hover(new MouseEvent('mouseover', { ctrlKey: true }), target, model, model.groups[index], true);
+      expect(Array.from((await render()).querySelectorAll('li'), item => item.textContent)).toEqual(index === 0
+        ? ['Main first.', 'Main second.']
+        : ['Supplement first.', 'Supplement second.']);
+    }
+  });
+
+  it('does not fill a unique intermediate reference from an ambiguous plain-text bibliography scope', async () => {
+    const note = 'Ambiguous [1–3].\n\n1. Main first. ^ref-1\n2. Main second. ^ref-2\n3. Main third. ^ref-3'
+      + '\n\n## Any title\n1. Supplement first. ^sref-1\n3. Supplement third. ^sref-3';
+    const { processPlain, render } = await setup(note);
+    mouseover(anchor(await processPlain()));
+    expect(Array.from((await render()).querySelectorAll('li'), item => [item.value, item.textContent])).toEqual([
+      [1, 'Ambiguous bibliography'], [2, 'Ambiguous bibliography'], [3, 'Ambiguous bibliography']
+    ]);
   });
 
   it('honors the reading-view modifier and the current core-plugin state', async () => {

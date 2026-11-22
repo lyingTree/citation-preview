@@ -86,7 +86,7 @@ jobs:
             '',
             'Hover over numeric citations such as [1-10] or [3,1-10,12] to view the corresponding references together in Obsidian Page preview. Citation groups are assembled in memory from the numbered bibliography in the same note.',
             '',
-            'A consistent citation and bibliography format is required. References must be explicitly numbered, unique, and listed under a supported bibliography heading in the same note. See README.md for the exact format and linked-citation examples.',
+            'Reference blocks are identified by unique ^ref-N and ^sref-N block IDs in the same note. No particular bibliography heading is required. Use explicit links to distinguish main and supplementary references with the same number. See README.md for the exact format and linked-citation examples.',
             '',
             '## Changes',
             '',

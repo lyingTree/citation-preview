@@ -1,7 +1,15 @@
 import { ignoredMarkdownRanges } from './bibliography';
+import { localLinkAnchor } from './links';
 import type { CitationGroup, ParseOptions, ReferenceIndex } from './types';
 
-interface NumberToken { number: number; to: number; linked: boolean; valid: boolean }
+interface NumberToken {
+  number: number;
+  to: number;
+  linked: boolean;
+  valid: boolean;
+  scopeId?: string;
+  target?: string;
+}
 interface Parts { tokens: NumberToken[]; separators: string[]; to: number }
 
 function positiveInteger(text: string): number | undefined {
@@ -10,37 +18,14 @@ function positiveInteger(text: string): number | undefined {
   return Number.isSafeInteger(value) ? value : undefined;
 }
 
-function normalizePath(path: string): string {
-  const parts: string[] = [];
-  for (const part of path.replace(/\\/g, '/').replace(/\.md$/i, '').split('/')) {
-    if (!part || part === '.') continue;
-    if (part === '..') { parts.pop(); continue; }
-    parts.push(part);
-  }
-  return parts.join('/');
-}
-
-function localReferenceLink(target: string, number: number, index: ReferenceIndex, sourcePath?: string): boolean {
-  let destination: string;
-  try { destination = decodeURIComponent(target); } catch { return false; }
-  if (/^[a-z][a-z\d+.-]*:/i.test(destination) || destination.startsWith('//')) return false;
-  const hash = destination.indexOf('#');
-  if (hash < 0) return false;
-  const path = destination.slice(0, hash);
-  const anchor = destination.slice(hash + 1);
-  if (path) {
-    if (!sourcePath) return false;
-    const source = normalizePath(sourcePath);
-    const normalized = normalizePath(path);
-    const relative = normalizePath(`${source.slice(0, Math.max(0, source.lastIndexOf('/')))}/${path}`);
-    const basename = source.slice(source.lastIndexOf('/') + 1);
-    if (normalized !== source && relative !== source && !(normalized === basename && !path.includes('/'))) return false;
-  }
-  const entry = index.entries.get(number);
-  if (!entry && !index.duplicates.has(number)) return false;
-  if (entry?.anchor === anchor) return true;
-  const anchorNumber = /^\^?(?:(?:ref(?:erence)?|bib(?:liography)?|cite|citation)[-_ ]?)?(\d+)$/i.exec(anchor);
-  return !!anchorNumber && Number(anchorNumber[1]) === number;
+function localReferenceLink(target: string, number: number, index: ReferenceIndex, sourcePath?: string): Pick<NumberToken, 'valid' | 'scopeId' | 'target'> {
+  const anchor = localLinkAnchor(target, sourcePath);
+  if (!anchor || index.duplicateAnchors.has(anchor)) return { valid: false };
+  const entry = index.anchors.get(anchor);
+  // A plausible suffix is not evidence that a link points to a bibliography entry.
+  // Exact anchors also support supplementary and user-defined naming conventions.
+  if (!entry || entry.number !== number) return { valid: false };
+  return { valid: true, scopeId: entry.sectionId, target: anchor };
 }
 
 /** Read a Markdown link destination with bounded, balanced parentheses. */
@@ -78,14 +63,14 @@ function readToken(source: string, from: number, index: ReferenceIndex, options:
     if (divider < 0) return undefined;
     const number = positiveInteger(body.slice(divider + 1).trim());
     if (!number) return undefined;
-    return { number, to: end + 2, linked: true, valid: localReferenceLink(body.slice(0, divider), number, index, options.sourcePath) };
+    return { number, to: end + 2, linked: true, ...localReferenceLink(body.slice(0, divider), number, index, options.sourcePath) };
   }
   const linkLabel = /^\[([1-9]\d{0,8})\]/.exec(source.slice(from, from + 12));
   if (linkLabel) {
     const destination = destinationAt(source, from + linkLabel[0].length);
     if (!destination) return undefined;
     const number = Number(linkLabel[1]);
-    return { number, to: destination.to, linked: true, valid: localReferenceLink(destination.target, number, index, options.sourcePath) };
+    return { number, to: destination.to, linked: true, ...localReferenceLink(destination.target, number, index, options.sourcePath) };
   }
   const digits = /^[1-9]\d{0,8}/.exec(source.slice(from, from + 10));
   if (!digits || /\d/.test(source[from + digits[0].length] ?? '')) return undefined;
@@ -147,8 +132,21 @@ function groupFromParts(parts: Parts, from: number, to: number, index: Reference
   if (!numbers?.length) return undefined;
   // At least one indexed endpoint is evidence; absent intermediate entries are shown as missing.
   if (!parts.tokens.some(token => index.entries.has(token.number) || index.duplicates.has(token.number))) return undefined;
+  const scopes = new Set(parts.tokens.flatMap(token => token.scopeId ? [token.scopeId] : []));
+  // A range has no defined intermediate entries when its endpoints belong to different bibliographies.
+  if (scopes.size > 1) return undefined;
+  let scopeId = scopes.values().next().value;
+  let ambiguousScope = false;
+  if (!scopeId) {
+    const endpoints = parts.tokens.filter(token => index.entries.has(token.number) || index.duplicates.has(token.number));
+    const candidates = index.sections.filter(section => endpoints.every(token => section.entries.has(token.number) || section.duplicates.has(token.number)));
+    if (!candidates.length) return undefined;
+    if (candidates.length === 1) scopeId = candidates[0].id;
+    else ambiguousScope = true;
+  }
   const label = `[${parts.tokens.map((token, i) => `${token.number}${parts.separators[i] ? (/[-–—−－]/.test(parts.separators[i]) ? '–' : ', ') : ''}`).join('')}]`;
-  return { from, to, label, numbers, linked };
+  return { from, to, label, numbers, linked, scopeId, ambiguousScope,
+    linkTargets: parts.tokens.flatMap(token => token.target ? [token.target] : []) };
 }
 
 function bracketGroup(source: string, from: number, index: ReferenceIndex, options: ParseOptions): CitationGroup | undefined {
@@ -164,7 +162,10 @@ function bracketGroup(source: string, from: number, index: ReferenceIndex, optio
   let outerLink = false;
   if (source[to] === '(') {
     const destination = destinationAt(source, to);
-    if (!destination || !localReferenceLink(destination.target, parts.tokens[0].number, index, options.sourcePath)) return undefined;
+    if (!destination) return undefined;
+    const resolution = localReferenceLink(destination.target, parts.tokens[0].number, index, options.sourcePath);
+    if (!resolution.valid) return undefined;
+    parts.tokens[0] = { ...parts.tokens[0], ...resolution, linked: true };
     outerLink = true;
     to = destination.to;
   }
@@ -186,7 +187,7 @@ export function findCitationGroups(source: string, index: ReferenceIndex, option
   if ((!index.entries.size && !index.duplicates.size) || !Number.isFinite(options.maxReferences) || options.maxReferences < 1) return [];
   const boundedOptions = { ...options, maxReferences: Math.min(1000, Math.floor(options.maxReferences)) };
   const chars = source.split('');
-  for (const range of [...ignored, ...index.sections]) maskRange(chars, range.from, range.to);
+  for (const range of [...ignored, ...index.referenceRanges]) maskRange(chars, range.from, range.to);
   // A Markdown link can wrap its destination in angle brackets, including local block links.
   // Preserve those destinations while masking HTML attributes and raw code containers.
   const markup = /\]\([ \t]*<[^<>\r\n]*>(?=[ \t]*(?:\)|["'(]))|<(pre|code|script|style)\b[^>]*>[\s\S]*?<\/\1\s*>|<[^>\n]*>/gi;

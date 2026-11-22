@@ -103,8 +103,8 @@ describe('findCitationGroups', () => {
   });
 
   it('keeps separate local references instead of combining their bibliography indices', () => {
-    const first = '[1–3]\n\n## References\n[1] A.\n[2] B.\n[3] C.';
-    const second = '[1–3]\n\n## References\n[1] X.\n[2] Y.\n[3] Z.';
+    const first = '[1–3]\n\n[1] A. ^ref-1\n[2] B. ^ref-2\n[3] C. ^ref-3';
+    const second = '[1–3]\n\n[1] X. ^ref-1\n[2] Y. ^ref-2\n[3] Z. ^ref-3';
     const a = parseReferences(first);
     const b = parseReferences(second);
     expect(findCitationGroups(first, a, options)[0].numbers).toEqual([1, 2, 3]);
@@ -114,12 +114,12 @@ describe('findCitationGroups', () => {
   });
 
   it('keeps missing intermediate entries so the UI can report them', () => {
-    const source = '[1–10]\n\n## References\n[1] First.\n[10] Tenth.';
+    const source = '[1–10]\n\n[1] First. ^ref-1\n[10] Tenth. ^ref-10';
     expect(findCitationGroups(source, parseReferences(source), options)[0].numbers).toHaveLength(10);
   });
 
   it('keeps ambiguous entries so the UI can report them', () => {
-    const source = '[1–2]\n\n## References\n[1] A.\n[1] Ambiguous.\n[2] B.';
+    const source = '[1–2]\n\n[1] A. ^ref-1\n[1] Ambiguous. ^ref-1\n[2] B. ^ref-2';
     const index = parseReferences(source);
     expect(index.duplicates.has(1)).toBe(true);
     expect(findCitationGroups(source, index, options)[0].numbers).toEqual([1, 2]);

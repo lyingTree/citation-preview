@@ -10,7 +10,12 @@ import { DEFAULT_SETTINGS, type CitationGroup, type PluginSettings } from './typ
 interface ReadingTarget {
   model: CitationDocument;
   group: CitationGroup | undefined;
-  label: string;
+  key: string;
+}
+
+/** Visible numbers can repeat in independently numbered bibliographies. */
+function groupKey(group: CitationGroup): string {
+  return JSON.stringify([group.scopeId ?? null, group.linkTargets ?? [], group.numbers, group.ambiguousScope ?? false]);
 }
 
 export default class CitationPreview extends Plugin {
@@ -73,10 +78,11 @@ export default class CitationPreview extends Plugin {
   hover(event: MouseEvent, anchor: HTMLElement, model: CitationDocument, group: CitationGroup, editor = false): boolean {
     if (!isPagePreviewEnabled(this.app)) return false;
     if (!editor && this.settings.requireModifier && !event.ctrlKey && !event.metaKey) return false;
-    let preview = model.previewGroups.get(group.label);
+    const key = groupKey(group);
+    let preview = model.previewGroups.get(key);
     if (!preview) {
       preview = this.buildPreview(model, group);
-      model.previewGroups.set(group.label, preview);
+      model.previewGroups.set(key, preview);
     }
     this.previewPath = model.sourcePath;
     this.app.workspace.trigger('hover-link', {
@@ -93,14 +99,17 @@ export default class CitationPreview extends Plugin {
 
   private buildPreview(model: CitationDocument, group: CitationGroup): GroupPreview {
     let linktext: string | undefined;
+    const references = group.scopeId === undefined ? model.references
+      : model.references.sections.find(section => section.id === group.scopeId);
     const entries = group.numbers.map(number => {
-      const reference = model.references.entries.get(number);
+      if (group.ambiguousScope) return 'Ambiguous bibliography';
+      const reference = references?.entries.get(number);
       if (!linktext && reference?.anchor?.startsWith('^')) linktext = '#' + reference.anchor;
-      if (!reference) return model.references.duplicates.has(number) ? 'Duplicate reference' : 'Reference not found';
+      if (!reference) return references?.duplicates.has(number) ? 'Duplicate reference' : 'Reference not found';
       return reference.markdown.replace(/!\[\[/g, '[[').replace(/!\[([^\]]*)\]\(/g, '[$1](');
     });
     const markdown = entries.map(entry => '1. ' + (entry || '\u00a0').replace(/\n/g, '\n   ')).join('\n');
-    // A subpath keeps the preview in block mode even when the bibliography has no anchors.
+    // A subpath also keeps missing or ambiguous reference previews in block mode.
     return { linktext: linktext ?? '#^crp-preview', markdown, entries, numbers: group.numbers };
   }
 
@@ -131,7 +140,7 @@ export default class CitationPreview extends Plugin {
     for (const trigger of triggers) {
       const anchor = trigger.element;
       anchor.setAttribute('aria-haspopup', 'dialog');
-      const target: ReadingTarget = { model, group: trigger.group, label: trigger.group.label };
+      const target: ReadingTarget = { model, group: trigger.group, key: groupKey(trigger.group) };
       targets.add(target);
       registered.push(target);
       let handled = false;
@@ -169,9 +178,9 @@ export default class CitationPreview extends Plugin {
     if (first.model.source === source) return;
     this.closePreview(path);
     const model = this.parse(source, path);
-    const byLabel = new Map(model.groups.map(group => [group.label, group]));
+    const byKey = new Map(model.groups.map(group => [groupKey(group), group]));
     for (const target of this.readingByPath.get(path) ?? []) {
-      target.group = byLabel.get(target.label);
+      target.group = byKey.get(target.key);
       target.model = model;
     }
   }

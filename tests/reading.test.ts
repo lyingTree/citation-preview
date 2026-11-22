@@ -95,6 +95,42 @@ describe('reading view citation decoration', () => {
     expect(triggers[0].element.querySelector('a')?.getAttribute('data-href')).toBe('Notes/Paper.md#^ref-1');
   });
 
+  it('aligns reference targets rather than consuming equal-numbered figure links', () => {
+    const root = fixture('<p>Figures [<a href="#^fig-1">1</a>–<a href="#^fig-10">10</a>], references [<a href="#^ref-1">1</a>–<a href="#^ref-10">10</a>].</p>');
+    const citation = { ...group('[1–10]', true), scopeId: 'main', linkTargets: ['^ref-1', '^ref-10'] };
+    const triggers = decorateReadingCitations(root, [citation]);
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0].element.querySelector('a')?.getAttribute('href')).toBe('#^ref-1');
+    expect(root.querySelector('a[href="#^fig-1"]')?.closest('.crp-citation')).toBeNull();
+  });
+
+  it('uses exact linked targets to distinguish equal visible numbers from different bibliographies', () => {
+    const root = fixture('<p>[<a href="#^sref-1">1</a>–<a href="#^sref-10">10</a>] then [<a href="#^ref-1">1</a>–<a href="#^ref-10">10</a>].</p>');
+    const main = { ...group('[1–10]', true, 0), scopeId: 'main', linkTargets: ['^ref-1', '^ref-10'] };
+    const supplement = { ...group('[1–10]', true, 50), scopeId: 'supplement', linkTargets: ['^sref-1', '^sref-10'] };
+    const triggers = decorateReadingCitations(root, [main, supplement]);
+    expect(triggers.map(trigger => trigger.group.scopeId)).toEqual(['supplement', 'main']);
+    expect(triggers.map(trigger => trigger.element.querySelector('a')?.getAttribute('href'))).toEqual(['#^sref-1', '#^ref-1']);
+  });
+
+  it('resolves relative same-note paths and encoded anchors using the source parser rules', () => {
+    const root = fixture('<p>[<a data-href="../Notes/Paper%20one.md#%5Eref-1">1</a>–<a href="./Paper%20one.md#^ref-10">10</a>].</p>');
+    const citation = { ...group('[1–10]', true), linkTargets: ['^ref-1', '^ref-10'] };
+    const triggers = decorateReadingCitations(root, [citation], { sourcePath: 'Notes/Paper one.md' });
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0].element.textContent).toBe('[1–10]');
+  });
+
+  it('requires the complete ordered target sequence while preserving repeated endpoint links', () => {
+    const root = fixture('<p>[<a href="#^ref-10">1</a>–<a href="#^ref-1">10</a>] then [<a href="#^ref-1">1</a>–<a href="#^ref-10">10</a>, <a href="#^ref-1">1</a>].</p>');
+    const range = { ...group('[1–10]', true), linkTargets: ['^ref-1', '^ref-10'] };
+    const repeated = { ...group('[1–10, 1]', true, 30), linkTargets: ['^ref-1', '^ref-10', '^ref-1'] };
+    const triggers = decorateReadingCitations(root, [range, repeated]);
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0].group).toBe(repeated);
+    expect(triggers[0].element.querySelectorAll('a')).toHaveLength(3);
+  });
+
   it('supports endpoint links without outer brackets but does not decorate bare numbers', () => {
     const root = fixture('<p>Temperature 1–10 then <a href="#ref-1">1</a>–<a href="#ref-10">10</a>.</p>');
     const triggers = decorateReadingCitations(root, [group('[1–10]', true)]);
