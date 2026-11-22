@@ -29,7 +29,9 @@ export function normalizeSettings(value: unknown): PluginSettings {
     maxReferences: number('maxReferences', 10, 500),
     recognizePlainText: bool('recognizePlainText'),
     requireModifier: bool('requireModifier'),
-    enableEditor: bool('enableEditor')
+    enableEditor: bool('enableEditor'),
+    citationLinks: bool('citationLinks'),
+    citationColor: data.citationColor === 'theme' ? 'theme' : 'blue'
   };
 }
 
@@ -43,6 +45,27 @@ export class CitationSettingsTab extends PluginSettingTab {
   getSettingDefinitions(): CitationSettingDefinition[] {
     return [
       {
+        name: 'Show citations as links',
+        desc: 'Color resolved citations and enable navigation for plain numeric citations. Existing links and hover previews keep working.',
+        render: setting => {
+          setting.addToggle(toggle => toggle.setValue(this.owner.settings.citationLinks).onChange(async value => {
+            this.owner.settings.citationLinks = value;
+            await this.owner.saveSettings(true);
+          }));
+        }
+      },
+      {
+        name: 'Citation color',
+        desc: 'Use blue adapted to light and dark themes, or follow the theme’s link color.',
+        render: setting => {
+          setting.addDropdown(dropdown => dropdown.addOptions({ blue: 'Blue', theme: 'Follow theme' })
+            .setValue(this.owner.settings.citationColor).onChange(async value => {
+              this.owner.settings.citationColor = value === 'theme' ? 'theme' : 'blue';
+              await this.owner.saveSettings(true);
+            }));
+        }
+      },
+      {
         name: 'Maximum references per group',
         desc: 'Larger groups are skipped. This bounds work for malformed or very large ranges.',
         render: setting => {
@@ -55,7 +78,7 @@ export class CitationSettingsTab extends PluginSettingTab {
       },
       {
         name: 'Recognize plain numeric citations',
-        desc: 'Also recognize bracketed numbers without links when the note has numbered references. Turn off if numeric intervals are being mistaken for citations.',
+        desc: 'Resolve bracketed numbers using section context and the nearest reference list, including lists without anchors. Turn off if numeric intervals are being mistaken for citations.',
         render: setting => {
           setting.addToggle(toggle => toggle.setValue(this.owner.settings.recognizePlainText).onChange(async value => {
             this.owner.settings.recognizePlainText = value;
@@ -74,8 +97,8 @@ export class CitationSettingsTab extends PluginSettingTab {
         }
       },
       {
-        name: 'Enable editor previews',
-        desc: 'Show previews in live preview and source mode as well as reading view.',
+        name: 'Enable editor previews and links',
+        desc: 'Show previews and citation link styling in live preview and source mode as well as reading view.',
         render: setting => {
           setting.addToggle(toggle => toggle.setValue(this.owner.settings.enableEditor).onChange(async value => {
             this.owner.settings.enableEditor = value;

@@ -1,9 +1,13 @@
-import type { CitationGroup } from './types';
+import type { CitationGroup, PluginSettings } from './types';
+import type { CitationDocument } from './model';
 import { localLinkAnchor } from './links';
+import { usesNativeSinglePreview } from './citation-state';
 
 export interface ReadingTrigger {
   element: HTMLElement;
   group: CitationGroup;
+  /** Refresh resolution and virtual links without replacing existing native anchors. */
+  update(model: CitationDocument, group: CitationGroup | undefined): void;
   /** Idempotent: remove only this wrapper and preserve every original child. */
   dispose(): void;
 }
@@ -11,6 +15,9 @@ export interface ReadingTrigger {
 export interface ReadingOptions {
   /** Used to distinguish a link to this note from an identically numbered other note. */
   sourcePath?: string;
+  model?: CitationDocument;
+  settings?: Pick<PluginSettings, 'citationLinks' | 'citationColor'>;
+  onNavigate?(model: CitationDocument, group: CitationGroup, number: number, event: MouseEvent | KeyboardEvent): boolean | void;
 }
 
 interface TextSegment {
@@ -104,12 +111,17 @@ function candidates(run: TextRun): Candidate[] {
     const from = match.index;
     result.push({ run, from, to: from + match[0].length, key: signature(match[0]), bracketed: true });
   }
-  // Explicit Markdown links can render as 1–10 without outer brackets.
-  const bare = /[0-9０-９]+(?:\s*[-–—−－,，、;；]\s*[0-9０-９]+)+/g;
+  // Explicit Markdown links can render as 1 or 1–10 without outer brackets.
+  // Plain source groups still require visible brackets when matching below.
+  const bracketedCandidates = [...result];
+  let bracketIndex = 0;
+  const bare = /[0-9０-９]+(?:\s*[-–—−－,，、;；]\s*[0-9０-９]+)*/g;
   for (const match of run.text.matchAll(bare)) {
     const from = match.index;
     const to = from + match[0].length;
-    if (result.some(candidate => from >= candidate.from && to <= candidate.to)) continue;
+    while (bracketIndex < bracketedCandidates.length && bracketedCandidates[bracketIndex].to <= from) bracketIndex += 1;
+    const enclosing = bracketedCandidates[bracketIndex];
+    if (enclosing && from >= enclosing.from && to <= enclosing.to) continue;
     if (/[\p{L}\p{N}_]/u.test(run.text[from - 1] ?? '') || /[\p{L}\p{N}_]/u.test(run.text[to] ?? '')) continue;
     result.push({ run, from, to, key: signature(match[0]), bracketed: false });
   }
@@ -163,6 +175,136 @@ function safeRange(candidate: Candidate, document: Document): Range | null {
   return range;
 }
 
+function unwrap(element: HTMLElement): void {
+  const parent = element.parentNode;
+  if (!parent) return;
+  const fragment = element.ownerDocument.createDocumentFragment();
+  while (element.firstChild) fragment.appendChild(element.firstChild);
+  parent.replaceChild(fragment, element);
+}
+
+/** Read only the visible text; an enclosing native link always keeps its original target. */
+function visibleRun(root: HTMLElement): TextRun {
+  const run: TextRun = { text: '', segments: [] };
+  const walker = root.ownerDocument.createTreeWalker(root, 4 /* SHOW_TEXT */);
+  let node: Node | null;
+  while ((node = walker.nextNode())) {
+    const text = node as Text;
+    const from = run.text.length;
+    run.text += text.data;
+    run.segments.push({ node: text, from, to: run.text.length });
+  }
+  return run;
+}
+
+/** Add links only to displayed number tokens, never to expanded, deduplicated preview numbers. */
+function numberRanges(root: HTMLElement, group: CitationGroup): Array<{ candidate: Candidate; number: number }> {
+  if (root.closest('a')) return [];
+  const run = visibleRun(root);
+  const matches = Array.from(run.text.matchAll(/[0-9０-９]+/g));
+  const numbers = matches.map(match => Number(signature(match[0])));
+  const expected = group.tokens?.map(token => token.number)
+    ?? Array.from(group.label.matchAll(/\d+/g), match => Number(match[0]));
+  if (numbers.length !== expected.length || numbers.some((number, index) => number !== expected[index])) return [];
+  return matches.flatMap((match, index) => {
+    const candidate: Candidate = {
+      run, from: match.index, to: match.index + match[0].length,
+      key: match[0], bracketed: false
+    };
+    if (candidateLinks(candidate).size) return [];
+    return [{ candidate, number: numbers[index] }];
+  });
+}
+
+function createTrigger(wrapper: HTMLElement, initialGroup: CitationGroup, options: ReadingOptions): ReadingTrigger {
+  let currentModel = options.model;
+  let currentGroup: CitationGroup | undefined = initialGroup;
+  let disposed = false;
+  const generated: Array<{ element: HTMLAnchorElement; dispose(): void }> = [];
+
+  const removeLinks = (): void => {
+    for (const link of generated.splice(0)) {
+      link.dispose();
+      unwrap(link.element);
+    }
+  };
+
+  const refresh = (): void => {
+    removeLinks();
+    const nativeSingle = currentGroup && usesNativeSinglePreview(currentGroup);
+    wrapper.classList.toggle('crp-native-citation', !!nativeSingle);
+    if (currentGroup && !nativeSingle) {
+      wrapper.setAttribute('tabindex', '0');
+      wrapper.setAttribute('role', 'group');
+      wrapper.setAttribute('aria-label', `Preview references ${currentGroup.label}`);
+    } else {
+      wrapper.removeAttribute('tabindex');
+      wrapper.removeAttribute('role');
+      wrapper.removeAttribute('aria-label');
+    }
+    const resolved = !!currentModel && !!currentGroup && currentModel.isResolved(currentGroup);
+    const enabled = options.settings?.citationLinks ?? true;
+    wrapper.classList.toggle('crp-resolved', enabled && resolved);
+    wrapper.classList.toggle('crp-link-blue', enabled && resolved && options.settings?.citationColor !== 'theme');
+    wrapper.classList.toggle('crp-link-theme', enabled && resolved && options.settings?.citationColor === 'theme');
+    if (!enabled || !resolved || !currentModel || !currentGroup || !options.onNavigate) return;
+
+    for (const { candidate, number } of numberRanges(wrapper, currentGroup).reverse()) {
+      const reference = currentModel.reference(currentGroup, number);
+      if (!reference) continue;
+      const range = safeRange(candidate, wrapper.ownerDocument);
+      if (!range) continue;
+      const link = wrapper.ownerDocument.createElement('a');
+      const href = reference.anchor ? `#${reference.anchor}` : currentModel.sourcePath;
+      link.className = 'crp-reference-link';
+      link.setAttribute('href', href);
+      link.setAttribute('data-href', href);
+      link.setAttribute('data-crp-number', String(number));
+      link.setAttribute('aria-label', `Reference ${number}`);
+      try {
+        range.surroundContents(link);
+      } catch {
+        continue;
+      }
+      const navigate = (event: MouseEvent | KeyboardEvent): void => {
+        if (event.type === 'keydown' && (event as KeyboardEvent).key !== 'Enter') return;
+        if (event.type === 'click' && (event as MouseEvent).button !== 0) return;
+        if (event.type === 'auxclick' && (event as MouseEvent).button !== 1) return;
+        // Synthetic links are owned by this plugin, including keyboard and new-pane activation.
+        event.preventDefault();
+        event.stopPropagation();
+        if (currentModel && currentGroup) options.onNavigate?.(currentModel, currentGroup, number, event);
+      };
+      link.addEventListener('click', navigate);
+      link.addEventListener('auxclick', navigate);
+      link.addEventListener('keydown', navigate);
+      generated.push({ element: link, dispose: () => {
+        link.removeEventListener('click', navigate);
+        link.removeEventListener('auxclick', navigate);
+        link.removeEventListener('keydown', navigate);
+      } });
+    }
+  };
+
+  refresh();
+  return {
+    element: wrapper,
+    group: initialGroup,
+    update(model, group): void {
+      if (disposed) return;
+      currentModel = model;
+      currentGroup = group;
+      refresh();
+    },
+    dispose(): void {
+      if (disposed) return;
+      disposed = true;
+      removeLinks();
+      unwrap(wrapper);
+    }
+  };
+}
+
 /**
  * Decorate only groups belonging to this rendered Markdown section. The caller must filter
  * source groups with MarkdownPostProcessorContext.getSectionInfo; global groups are ambiguous.
@@ -209,9 +351,6 @@ export function decorateReadingCitations(
     if (!range) continue;
     const wrapper = root.ownerDocument.createElement('span');
     wrapper.className = 'crp-citation';
-    wrapper.setAttribute('tabindex', '0');
-    wrapper.setAttribute('role', 'group');
-    wrapper.setAttribute('aria-label', `Preview references ${group.label}`);
     wrapper.setAttribute('data-crp-label', group.label);
     try {
       range.surroundContents(wrapper);
@@ -219,20 +358,7 @@ export function decorateReadingCitations(
       // Unusual plugin-rendered inline structures are safer to leave untouched.
       continue;
     }
-    let disposed = false;
-    triggers.push({
-      element: wrapper,
-      group,
-      dispose(): void {
-        if (disposed) return;
-        disposed = true;
-        const parent = wrapper.parentNode;
-        if (!parent) return;
-        const fragment = root.ownerDocument.createDocumentFragment();
-        while (wrapper.firstChild) fragment.appendChild(wrapper.firstChild);
-        parent.replaceChild(fragment, wrapper);
-      }
-    });
+    triggers.push(createTrigger(wrapper, group, options));
   }
   return triggers.reverse();
 }

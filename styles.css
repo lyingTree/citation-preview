@@ -3,7 +3,57 @@
   cursor: help;
 }
 
-.crp-citation:focus-visible {
+.crp-native-citation {
+  cursor: inherit;
+}
+
+.crp-link-blue {
+  --crp-link-color: #2563eb;
+  --crp-link-hover-color: #1d4ed8;
+}
+
+.theme-dark .crp-link-blue {
+  --crp-link-color: #75b9ff;
+  --crp-link-hover-color: #acd5ff;
+}
+
+.crp-link-theme {
+  --crp-link-color: var(--link-color);
+  --crp-link-hover-color: var(--link-color-hover);
+}
+
+.crp-citation.crp-resolved,
+.crp-citation.crp-resolved a,
+.markdown-source-view.mod-cm6 .cm-content .crp-editor-link,
+.cm-editor .crp-editor-link {
+  color: var(--crp-link-color);
+}
+
+.crp-citation.crp-resolved a {
+  text-decoration: none;
+}
+
+.crp-citation.crp-resolved:hover,
+.crp-citation.crp-resolved:hover a,
+.crp-citation.crp-resolved:focus-visible,
+.crp-citation.crp-resolved a:focus-visible,
+.markdown-source-view.mod-cm6 .cm-content .crp-editor-link:hover,
+.cm-editor .crp-editor-link:hover {
+  color: var(--crp-link-hover-color);
+  text-decoration: underline;
+  text-underline-offset: 0.12em;
+}
+
+.crp-reference-link {
+  cursor: pointer;
+}
+
+.cm-editor .crp-editor-number {
+  cursor: text;
+}
+
+.crp-citation:focus-visible,
+.crp-reference-link:focus-visible {
   outline: 2px solid var(--interactive-accent);
   outline-offset: 2px;
 }

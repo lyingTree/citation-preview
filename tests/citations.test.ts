@@ -185,4 +185,47 @@ describe('findCitationGroups', () => {
   it('never parses the bibliography itself as citations', () => {
     expect(find('No body citations.')).toEqual([]);
   });
+
+  it('keeps displayed number tokens separate from expanded and deduplicated numbers', () => {
+    const body = '😀 A [3,1-5,3].';
+    const group = find(body)[0];
+    expect(group.numbers).toEqual([3, 1, 2, 4, 5]);
+    expect(group.tokens?.map(token => token.number)).toEqual([3, 1, 5, 3]);
+    expect(group.tokens?.map(token => body.slice(token.from, token.to))).toEqual(['3', '1', '5', '3']);
+    expect(group.visibleRanges?.map(range => body.slice(range.from, range.to)).join('')).toBe('[3,1-5,3]');
+  });
+
+  it('exposes only displayed characters of Markdown and wiki-linked groups', () => {
+    for (const body of [
+      String.raw`\[[1](<#^ref-1>),[3](#^ref-3)\]`,
+      String.raw`\[[[#^ref-1| 1 ]],[[#^ref-3|3]]\]`
+    ]) {
+      const group = find(body)[0];
+      expect(group.tokens?.map(token => body.slice(token.from, token.to))).toEqual(['1', '3']);
+      expect(group.visibleRanges?.map(range => body.slice(range.from, range.to)).join('')).toBe('[1,3]');
+      expect(group.tokens?.map(token => token.target)).toEqual(['^ref-1', '^ref-3']);
+      expect(group.outerLinkTarget).toBeUndefined();
+    }
+  });
+
+  it('records an overall linked range target independently of its displayed endpoints', () => {
+    for (const target of ['ref-1', 'ref-3']) {
+      const body = `[1-5](#^${target})`;
+      const group = find(body)[0];
+      expect(group.outerLinkTarget).toBe(`^${target}`);
+      expect(group.linkTargets).toEqual([`^${target}`]);
+      expect(group.numbers).toEqual([1, 2, 3, 4, 5]);
+      expect(group.tokens?.every(token => token.linked && token.target === `^${target}`)).toBe(true);
+      expect(group.visibleRanges?.map(range => body.slice(range.from, range.to)).join('')).toBe('1-5');
+    }
+  });
+
+  it('exposes a single native wiki link for styling without inventing an overall link', () => {
+    const body = '[[#^ref-1|1]]';
+    const group = find(body)[0];
+    expect(group.numbers).toEqual([1]);
+    expect(group.linked).toBe(true);
+    expect(group.outerLinkTarget).toBeUndefined();
+    expect(group.tokens?.map(token => body.slice(token.from, token.to))).toEqual(['1']);
+  });
 });

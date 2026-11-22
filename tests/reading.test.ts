@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest';
 import { decorateReadingCitations } from '../src/reading';
+import { CitationDocument } from '../src/model';
+import { DEFAULT_SETTINGS } from '../src/types';
 import type { CitationGroup } from '../src/types';
 
 function group(label = '[1–10]', linked = false, from = 0): CitationGroup {
@@ -178,5 +180,186 @@ describe('reading view citation decoration', () => {
     const triggers = decorateReadingCitations(root, [group()]);
     expect(triggers).toHaveLength(1);
     expect(triggers[0].element.ownerDocument).toBe(otherDocument);
+  });
+});
+
+describe('resolved reading links', () => {
+  const references = '\n\n' + Array.from({ length: 5 }, (_, index) =>
+    `[${index + 1}] Author ${index + 1}. Reference text. ^ref-${index + 1}`).join('\n');
+  const modelFor = (citation: string) => new CitationDocument(citation + references, 'Paper.md', DEFAULT_SETTINGS);
+
+  it('links displayed tokens in their original order instead of expanded or deduplicated numbers', () => {
+    const model = modelFor('[3,1-5,3]');
+    const root = fixture('<p>Evidence <sup>[3,1-5,3]</sup>.</p>');
+    const before = root.textContent;
+    const onNavigate = vi.fn();
+    const [trigger] = decorateReadingCitations(root, model.groups, { model, onNavigate, settings: DEFAULT_SETTINGS });
+    expect(trigger.element.classList.contains('crp-resolved')).toBe(true);
+    expect(trigger.element.classList.contains('crp-link-blue')).toBe(true);
+    const anchors = Array.from(root.querySelectorAll<HTMLAnchorElement>('a'));
+    expect(anchors.map(anchor => anchor.textContent)).toEqual(['3', '1', '5', '3']);
+    expect(anchors.map(anchor => anchor.getAttribute('href'))).toEqual(['#^ref-3', '#^ref-1', '#^ref-5', '#^ref-3']);
+    anchors[2].dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    expect(onNavigate).toHaveBeenCalledExactlyOnceWith(model, model.groups[0], 5, expect.any(MouseEvent));
+    expect(root.textContent).toBe(before);
+    trigger.dispose();
+    expect(root.querySelector('a')).toBeNull();
+    expect(root.querySelector('sup')?.textContent).toBe('[3,1-5,3]');
+    expect(root.textContent).toBe(before);
+  });
+
+  it('styles a single native link without adding a second keyboard stop or intercepting its click', () => {
+    const model = modelFor('[1](#^ref-1)');
+    const root = fixture('<p>See <a href="#^ref-1">1</a>.</p>');
+    const native = root.querySelector<HTMLAnchorElement>('a')!;
+    const nativeClick = vi.fn((event: Event) => event.preventDefault());
+    native.addEventListener('click', nativeClick);
+    const onNavigate = vi.fn();
+    const [trigger] = decorateReadingCitations(root, model.groups, { model, onNavigate, settings: DEFAULT_SETTINGS });
+    expect(trigger.element.textContent).toBe('1');
+    expect(trigger.element.classList.contains('crp-resolved')).toBe(true);
+    expect(trigger.element.classList.contains('crp-native-citation')).toBe(true);
+    expect(trigger.element.hasAttribute('tabindex')).toBe(false);
+    expect(trigger.element.hasAttribute('role')).toBe(false);
+    native.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    expect(nativeClick).toHaveBeenCalledOnce();
+    expect(onNavigate).not.toHaveBeenCalled();
+    trigger.dispose();
+    expect(root.querySelector('a')).toBe(native);
+  });
+
+  it('does not confuse a bare prose number or a figure link with a single citation link', () => {
+    const model = modelFor('[1](#^ref-1)');
+    const root = fixture('<p>Value 1, figure <a href="#^fig-1">1</a>, citation <a href="#^ref-1">1</a>.</p>');
+    const triggers = decorateReadingCitations(root, model.groups, { model, settings: DEFAULT_SETTINGS });
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0].element.closest('a')?.getAttribute('href')).toBe('#^ref-1');
+    expect(root.querySelector('a[href="#^fig-1"]')?.querySelector('.crp-citation')).toBeNull();
+  });
+
+  it('preserves one whole-range native anchor and never creates nested links', () => {
+    const model = modelFor('[1-5](#^ref-1)');
+    const root = fixture('<p><a href="#^ref-1">1-5</a></p>');
+    const native = root.querySelector('a');
+    const [trigger] = decorateReadingCitations(root, model.groups, { model, onNavigate: vi.fn(), settings: DEFAULT_SETTINGS });
+    expect(trigger.element.classList.contains('crp-resolved')).toBe(true);
+    expect(root.querySelectorAll('a')).toHaveLength(1);
+    expect(root.querySelector('a')).toBe(native);
+    expect(native?.getAttribute('href')).toBe('#^ref-1');
+    trigger.dispose();
+    expect(root.querySelector('a')).toBe(native);
+  });
+
+  it('adds only missing number links around existing linked tokens and preserves formatting', () => {
+    const model = modelFor('[1,[3](#^ref-3),5]');
+    const root = fixture('<p>[<em>1</em>,<a href="#^ref-3">3</a>,<strong>5</strong>]</p>');
+    const native = root.querySelector('a');
+    const emphasis = root.querySelector('em');
+    const strong = root.querySelector('strong');
+    const [trigger] = decorateReadingCitations(root, model.groups, { model, onNavigate: vi.fn(), settings: DEFAULT_SETTINGS });
+    expect(root.querySelectorAll('a')).toHaveLength(3);
+    expect(root.querySelector('a[href="#^ref-3"]')).toBe(native);
+    expect(root.querySelector('em')).toBe(emphasis);
+    expect(root.querySelector('strong')).toBe(strong);
+    trigger.dispose();
+    expect(root.querySelectorAll('a')).toHaveLength(1);
+    expect(root.querySelector('a')).toBe(native);
+    expect(root.querySelector('em')).toBe(emphasis);
+    expect(root.textContent).toBe('[1,3,5]');
+  });
+
+  it('keeps a repeated mixed group available for custom hover after preview-number deduplication', () => {
+    const model = modelFor('[1,[1](#^ref-1)]');
+    expect(model.groups[0].numbers).toEqual([1]);
+    const root = fixture('<p>[1,<a href="#^ref-1">1</a>]</p>');
+    const native = root.querySelector('a');
+    const [trigger] = decorateReadingCitations(root, model.groups, { model, onNavigate: vi.fn(), settings: DEFAULT_SETTINGS });
+    expect(trigger.element.classList.contains('crp-native-citation')).toBe(false);
+    expect(trigger.element.getAttribute('tabindex')).toBe('0');
+    expect(root.querySelectorAll('a')).toHaveLength(2);
+    expect(root.querySelectorAll('.crp-reference-link')).toHaveLength(1);
+    expect(Array.from(root.querySelectorAll('a'))[1]).toBe(native);
+  });
+
+  it('does not present incomplete groups as resolved links', () => {
+    const model = new CitationDocument('[1-5]\n\n[1] First. ^ref-1\n[5] Fifth. ^ref-5', 'Paper.md', DEFAULT_SETTINGS);
+    const root = fixture('<p>[1-5]</p>');
+    const [trigger] = decorateReadingCitations(root, model.groups, { model, onNavigate: vi.fn(), settings: DEFAULT_SETTINGS });
+    expect(trigger.element.classList.contains('crp-resolved')).toBe(false);
+    expect(root.querySelector('a')).toBeNull();
+    expect(trigger.element.getAttribute('tabindex')).toBe('0');
+  });
+
+  it('removes stale resolution and generated links after metadata changes, and restores them when valid', () => {
+    const model = modelFor('[1-5]');
+    const root = fixture('<p>[1-5]</p>');
+    const onNavigate = vi.fn();
+    const [trigger] = decorateReadingCitations(root, model.groups, { model, onNavigate, settings: DEFAULT_SETTINGS });
+    const oldLink = root.querySelector('a')!;
+    const changed = new CitationDocument('[1-5]', 'Paper.md', DEFAULT_SETTINGS);
+    trigger.update(changed, undefined);
+    expect(trigger.element.classList.contains('crp-resolved')).toBe(false);
+    expect(trigger.element.classList.contains('crp-link-blue')).toBe(false);
+    expect(root.querySelector('a')).toBeNull();
+    expect(trigger.element.hasAttribute('tabindex')).toBe(false);
+    oldLink.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    expect(onNavigate).not.toHaveBeenCalled();
+    trigger.update(model, model.groups[0]);
+    expect(trigger.element.classList.contains('crp-resolved')).toBe(true);
+    expect(root.querySelectorAll('a')).toHaveLength(2);
+    trigger.dispose();
+    trigger.update(model, model.groups[0]);
+    expect(root.querySelector('a')).toBeNull();
+  });
+
+  it('withdraws resolved styling while preserving native anchors and listeners after a reference is removed', () => {
+    const citation = String.raw`\[[1](#^ref-1)-[5](#^ref-5)\]`;
+    const model = modelFor(citation);
+    const root = fixture('<p>[<a href="#^ref-1">1</a>-<a href="#^ref-5">5</a>]</p>');
+    const native = Array.from(root.querySelectorAll('a'));
+    const clicked = vi.fn((event: Event) => event.preventDefault());
+    native[0].addEventListener('click', clicked);
+    const [trigger] = decorateReadingCitations(root, model.groups, { model, onNavigate: vi.fn(), settings: DEFAULT_SETTINGS });
+    expect(trigger.element.classList.contains('crp-resolved')).toBe(true);
+    const changed = new CitationDocument(model.source.replace('^ref-3', '^other-3'), 'Paper.md', DEFAULT_SETTINGS);
+    trigger.update(changed, changed.groups[0]);
+    expect(trigger.element.classList.contains('crp-resolved')).toBe(false);
+    expect(trigger.element.classList.contains('crp-link-blue')).toBe(false);
+    expect(Array.from(root.querySelectorAll('a'))).toEqual(native);
+    expect(native.map(anchor => anchor.getAttribute('href'))).toEqual(['#^ref-1', '#^ref-5']);
+    native[0].dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    expect(clicked).toHaveBeenCalledOnce();
+  });
+
+  it('supports keyboard and new-pane activation only on plugin-created anchors', () => {
+    const model = modelFor('[1]');
+    const root = fixture('<p>[1]</p>');
+    const onNavigate = vi.fn();
+    decorateReadingCitations(root, model.groups, { model, onNavigate, settings: DEFAULT_SETTINGS });
+    const anchor = root.querySelector('a')!;
+    const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, metaKey: true });
+    anchor.dispatchEvent(enter);
+    expect(enter.defaultPrevented).toBe(true);
+    expect(onNavigate).toHaveBeenLastCalledWith(model, model.groups[0], 1, enter);
+    const middle = new MouseEvent('auxclick', { button: 1, bubbles: true, cancelable: true });
+    anchor.dispatchEvent(middle);
+    expect(middle.defaultPrevented).toBe(true);
+    expect(onNavigate).toHaveBeenLastCalledWith(model, model.groups[0], 1, middle);
+    anchor.dispatchEvent(new MouseEvent('auxclick', { button: 2, bubbles: true, cancelable: true }));
+    expect(onNavigate).toHaveBeenCalledTimes(2);
+  });
+
+  it('switches color preferences and removes virtual links when the feature is disabled', () => {
+    const model = modelFor('[1]');
+    const root = fixture('<p>[1]</p>');
+    const settings = { ...DEFAULT_SETTINGS, citationColor: 'theme' as const };
+    const [trigger] = decorateReadingCitations(root, model.groups, { model, settings, onNavigate: vi.fn() });
+    expect(trigger.element.classList.contains('crp-link-theme')).toBe(true);
+    expect(trigger.element.classList.contains('crp-link-blue')).toBe(false);
+    settings.citationLinks = false;
+    trigger.update(model, model.groups[0]);
+    expect(trigger.element.classList.contains('crp-resolved')).toBe(false);
+    expect(root.querySelector('a')).toBeNull();
+    expect(trigger.element.getAttribute('tabindex')).toBe('0');
   });
 });
