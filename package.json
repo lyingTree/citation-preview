@@ -1,7 +1,7 @@
 {
   "name": "citation-preview",
-  "version": "1.1.1",
-  "description": "Preview numeric citation groups in Page preview using the numbered bibliography in the same note.",
+  "version": "1.2.0",
+  "description": "Preview numeric citation groups in Page preview using reference block anchors in the same note.",
   "main": "main.js",
   "private": true,
   "scripts": {

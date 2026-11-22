@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.0
+
+- Identify references directly from their `^ref-N` and `^sref-N` block IDs, without requiring a bibliography heading. References work under arbitrary headings or with no heading, including notes whose headings contain section numbers or entry counts.
+- Also support compact IDs such as `^ref1` and named sets such as `^ref-appendix-1`. Unanchored numbered lists no longer create reference entries; existing plain citations need identifiable reference blocks.
+- Keep independent indexes for main and supplementary anchor prefixes, even when entries appear in different parts of a note. Resolve linked citations by their actual targets and expand ranges only within the selected reference set.
+- Separate previews and refreshes for groups with identical visible numbers but different reference targets. Check the exact rendered link targets so figure or equation links cannot consume a citation's preview.
+- Use the same local-link validation in Reading view and the editor, including relative and encoded note paths.
+- Preserve compact and spaced reference lists and multiline reference blocks. Retain ambiguity reporting when a plain numeric citation does not identify a unique reference set.
+- Add regression coverage and a copyable main/supplementary demonstration. Keep the plugin ID `citation-range-preview` and minimum Obsidian version `1.15.1`.
+
 ## 1.1.1
 
 - Make the native Page preview implementation available as an update for the existing Obsidian Community listing. The plugin keeps its existing ID, settings, and same-note bibliography format.

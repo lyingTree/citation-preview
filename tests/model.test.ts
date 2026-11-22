@@ -94,9 +94,9 @@ describe('citation line filtering', () => {
       '',
       '## References',
       '',
-      '1. Fictional one.',
-      '2. Fictional two.',
-      '3. Fictional three.'
+      '1. Fictional one. ^ref-1',
+      '2. Fictional two. ^ref-2',
+      '3. Fictional three. ^ref-3'
     ].join('\n');
     const model = new CitationDocument(source, 'Paper.md', DEFAULT_SETTINGS);
     expect(model.inLines(0, 1).map(group => group.numbers)).toEqual([[1, 2, 3], [2, 3]]);

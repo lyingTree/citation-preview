@@ -1,4 +1,4 @@
-import type { ReferenceEntry, ReferenceIndex } from './types';
+import type { ReferenceEntry, ReferenceIndex, ReferenceSection } from './types';
 
 export interface SourceRange { from: number; to: number }
 
@@ -29,9 +29,9 @@ function escaped(source: string, offset: number): boolean {
 }
 
 /** Syntax that must not be interpreted as citation text. No Markdown is executed. */
-export function ignoredMarkdownRanges(source: string, lines = sourceLines(source)): SourceRange[] {
+export function ignoredMarkdownRanges(source: string, lines = sourceLines(source), includeIndentedCode = true): SourceRange[] {
   const ranges: SourceRange[] = [];
-  let fenced: { marker: string; length: number; from: number } | undefined;
+  let fenced: { marker: string; length: number; from: number; inList: boolean } | undefined;
   let frontmatterEnd = 0;
   if (lines[0]?.text.replace(/^\uFEFF/, '').trim() === '---') {
     const close = lines.findIndex((line, i) => i > 0 && /^(?:---|\.\.\.)\s*$/.test(line.text));
@@ -40,7 +40,13 @@ export function ignoredMarkdownRanges(source: string, lines = sourceLines(source
   }
   for (const line of lines) {
     if (line.from < frontmatterEnd) continue;
-    const fence = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line.text);
+    const indent = indentation(line.text);
+    const continuationStart = !fenced && !includeIndentedCode && indent > 0 ? entryFirstLine(lines, line.line, 0) : undefined;
+    const parentList = continuationStart === undefined ? undefined : entryPrefix(lines[continuationStart].text);
+    const inList = !!parentList && indent >= parentList.contentIndent && indent < parentList.contentIndent + 4;
+    // Extra indentation is meaningful for a fence only inside an actual list item.
+    // Literal backticks in top-level indented code must not hide subsequent references.
+    const fence = (fenced?.inList || inList ? /^[ \t]*(`{3,}|~{3,})(.*)$/ : /^ {0,3}(`{3,}|~{3,})(.*)$/).exec(line.text);
     if (fenced) {
       if (fence && fence[1][0] === fenced.marker && fence[1].length >= fenced.length && !fence[2].trim()) {
         ranges.push({ from: fenced.from, to: line.to });
@@ -50,10 +56,10 @@ export function ignoredMarkdownRanges(source: string, lines = sourceLines(source
     }
     if (fence) {
       if (fence[1][0] === '`' && fence[2].includes('`')) continue;
-      fenced = { marker: fence[1][0], length: fence[1].length, from: line.from };
+      fenced = { marker: fence[1][0], length: fence[1].length, from: line.from, inList };
       continue;
     }
-    if (/^(?: {4}|\t)/.test(line.text)) ranges.push({ from: line.from, to: line.to });
+    if (indent >= 4 && (includeIndentedCode || continuationStart === undefined)) ranges.push({ from: line.from, to: line.to });
     if (/^ {0,3}\[[^\]\n]+\]:\s*/.test(line.text)) ranges.push({ from: line.from, to: line.to });
   }
   if (fenced) ranges.push({ from: fenced.from, to: source.length });
@@ -122,129 +128,160 @@ export function ignoredMarkdownRanges(source: string, lines = sourceLines(source
   return merged;
 }
 
-function heading(text: string): { level: number; title: string } | undefined {
-  const match = /^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$/.exec(text);
+/** Only explicit reference block IDs establish a bibliography namespace. */
+function referenceAnchor(id: string): { number: number; namespace: string } | undefined {
+  const match = /^(s?ref)-?([1-9]\d{0,8})$/i.exec(id)
+    ?? /^((?:s?ref)(?:-[A-Za-z][A-Za-z0-9]*)+)-([1-9]\d{0,8})$/i.exec(id);
   if (!match) return undefined;
-  return { level: match[1].length, title: match[2] };
+  return { number: Number(match[2]), namespace: match[1].toLowerCase() };
 }
 
-function isBibliographyTitle(title: string): boolean {
-  const normalized = title
-    .replace(/[*_]/g, '')
-    .replace(/^(?:\d+(?:\.\d+)*[.)、]?\s+|第[一二三四五六七八九十百\d]+[章节]\s*)/, '')
-    .replace(/[：:]\s*$/, '')
-    .trim();
-  return /^(?:references|bibliography|literature\s+cited|works\s+cited|参考文献|參考文獻|参考资料|參考資料)$/i.test(normalized);
+function rangeAt(offset: number, ranges: SourceRange[]): SourceRange | undefined {
+  let low = 0;
+  let high = ranges.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (ranges[middle].to <= offset) low = middle + 1;
+    else high = middle;
+  }
+  const range = ranges[low];
+  return range && range.from <= offset ? range : undefined;
 }
 
-const EMPTY_ANCHOR = /<a\s+[^>]*\b(?:id|name)\s*=\s*(?:"([^"]+)"|'([^']+)')[^>]*>\s*<\/a\s*>/gi;
-
-function anchorFrom(text: string): string | undefined {
-  const block = /(?:^|\s)\^([A-Za-z0-9-]+)\s*$/m.exec(text);
-  if (block) return `^${block[1]}`;
-  const anchor = /<a\s+[^>]*\b(?:id|name)\s*=\s*(?:"([^"]+)"|'([^']+)')[^>]*>/i.exec(text);
-  return anchor?.[1] ?? anchor?.[2];
+function indentation(text: string): number {
+  let width = 0;
+  for (const char of text) {
+    if (char === ' ') { width += 1; continue; }
+    if (char === '\t') { width += 4 - width % 4; continue; }
+    break;
+  }
+  return width;
 }
 
-interface EntryStart { number: number; prefix: number; heading?: string; anchor?: string }
+interface EntryPrefix { length: number; indent: number; contentIndent: number }
 
-function entryStart(text: string): EntryStart | undefined {
-  // HTML anchors may occur immediately before the reference label.
-  const anchorPrefix = /^(?:\s*<a\s+[^>]*\b(?:id|name)\s*=\s*(?:"[^"]+"|'[^']+')[^>]*>\s*<\/a\s*>\s*)*/i.exec(text)?.[0] ?? '';
-  const tail = text.slice(anchorPrefix.length);
-  const h = heading(tail);
-  const value = h ? h.title : tail;
-  const numbered = /^\s*(?:\[(\d+)\]|［(\d+)］|【(\d+)】|\((\d+)\)|（(\d+)）|(\d+)[.)、．])(?:\s*|$)/.exec(value);
-  const bareHeading = h ? /^\s*(\d+)\s*$/.exec(value) : null;
-  const digits = numbered ? numbered.slice(1).find(Boolean) : bareHeading?.[1];
-  if (!digits) return undefined;
-  const number = Number(digits);
-  if (!Number.isSafeInteger(number) || number < 1) return undefined;
-  const markerLength = numbered?.[0].length ?? value.length;
-  const prefix = anchorPrefix.length + (h ? tail.indexOf(h.title) : 0) + markerLength;
-  return { number, prefix, heading: h?.title, anchor: anchorFrom(anchorPrefix) };
-}
-
-function stripEntrySyntax(raw: string, start: EntryStart): string {
-  let text = raw.slice(start.prefix);
-  text = text.replace(EMPTY_ANCHOR, '').replace(/(?:^|\s)\^[A-Za-z0-9-]+\s*$/gm, '');
-  // Reference continuations commonly indent their wrapped lines.
-  return text.replace(/^ {1,4}(?=\S)/gm, '').trim();
-}
-
-/** Parse only explicit bibliography sections; never derive references from body numbers. */
-export function parseReferences(source: string, lines = sourceLines(source), ignored = ignoredMarkdownRanges(source, lines)): ReferenceIndex {
-  const result: ReferenceIndex = { entries: new Map(), duplicates: new Set(), sections: [] };
-  let blocked = 0;
-  const isIgnored = (offset: number): boolean => {
-    while (blocked < ignored.length && ignored[blocked].to <= offset) blocked += 1;
-    return !!ignored[blocked] && ignored[blocked].from <= offset && offset < ignored[blocked].to;
+function entryPrefix(text: string): EntryPrefix | undefined {
+  const match = /^[ \t]*(?:(?:\[\d+\]|［\d+］|【\d+】|\(\d+\)|（\d+）|\d+[.)、．])[ \t]*|[-+*][ \t]+)/.exec(text);
+  if (!match) return undefined;
+  return {
+    length: match[0].length,
+    indent: indentation(text),
+    contentIndent: indentation(match[0].replace(/\S/g, ' '))
   };
-  let section: { from: number; level: number } | undefined;
-  let current: { line: SourceLine; start: EntryStart; from: number; prefixAnchor?: string } | undefined;
-  let precedingAnchor: { from: number; text: string } | undefined;
+}
 
-  const finishEntry = (to: number): void => {
-    if (!current) return;
-    const { line, start, from, prefixAnchor = '' } = current;
-    const raw = source.slice(line.from, to);
-    const markdown = stripEntrySyntax(raw, start);
-    const entry: ReferenceEntry = {
-      number: start.number,
-      markdown,
-      from,
-      to: to - (source.slice(from, to).match(/\s*$/)?.[0].length ?? 0),
-      line: line.line,
-      anchor: anchorFrom(prefixAnchor + raw) ?? start.anchor ?? start.heading
-    };
-    if (result.entries.has(entry.number) || result.duplicates.has(entry.number)) {
-      result.duplicates.add(entry.number);
-      result.entries.delete(entry.number);
-    } else {
-      result.entries.set(entry.number, entry);
+/** Structural block boundaries, independent of the wording or language of any heading. */
+function blockBoundary(text: string): boolean {
+  return /^ {0,3}#{1,6}(?:\s|$)/.test(text)
+    || /^[ \t]*(?:`{3,}|~{3,})/.test(text)
+    || /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,}|=+)\s*$/.test(text)
+    || /(?:^|\s)\^[A-Za-z0-9-]+\s*$/.test(text);
+}
+
+/** Locate the paragraph/list item ending at an explicit anchor, never the following text. */
+function entryFirstLine(lines: SourceLine[], last: number, floor: number): number | undefined {
+  let first = last;
+  while (first > floor) {
+    const prefix = entryPrefix(lines[first].text);
+    if (prefix && prefix.indent <= 3) break;
+    const previous = lines[first - 1].text;
+    if (!previous.trim() || blockBoundary(previous)) break;
+    first -= 1;
+  }
+  const indent = indentation(lines[first].text);
+  if (!indent) return first;
+  if (entryPrefix(lines[first].text)?.indent === indent && indent <= 3) return first;
+
+  // A separately spaced, indented continuation can still belong to the previous list item.
+  // A true indented code block has no enclosing item, or is indented four extra columns.
+  for (let previous = first - 1; previous >= floor; previous -= 1) {
+    const text = lines[previous].text;
+    if (!text.trim()) continue;
+    if (blockBoundary(text)) break;
+    const prefix = entryPrefix(text);
+    if (prefix && prefix.indent <= 3) {
+      if (indent < prefix.contentIndent || indent >= prefix.contentIndent + 4) break;
+      const continuation = lines.slice(previous + 1, first).every(line => !line.text.trim() || indentation(line.text) >= prefix.contentIndent);
+      if (continuation) return previous;
+      break;
     }
-    current = undefined;
+    if (indentation(text) < indent) break;
+  }
+  return indent >= 4 ? undefined : first;
+}
+
+/** Parse anchored reference blocks anywhere in the note. Heading text never creates entries. */
+export function parseReferences(source: string, lines = sourceLines(source), ignored = ignoredMarkdownRanges(source, lines)): ReferenceIndex {
+  const result: ReferenceIndex = {
+    entries: new Map(), duplicates: new Set(), sections: [], referenceRanges: [],
+    anchors: new Map(), duplicateAnchors: new Set()
   };
-  const finishSection = (to: number): void => {
-    if (!section) return;
-    finishEntry(to);
-    result.sections.push({ from: section.from, to });
-    section = undefined;
-    precedingAnchor = undefined;
+  const namespaces = new Map<string, ReferenceSection>();
+  let hardIgnored: SourceRange[] | undefined;
+  let floor = 0;
+
+  const addNumber = (entry: ReferenceEntry, index: Pick<ReferenceIndex, 'entries' | 'duplicates'>): void => {
+    if (index.entries.has(entry.number) || index.duplicates.has(entry.number)) {
+      index.duplicates.add(entry.number);
+      index.entries.delete(entry.number);
+      return;
+    }
+    index.entries.set(entry.number, entry);
   };
 
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
-    if (isIgnored(line.from)) continue;
-    const h = heading(line.text);
-    const setext = lines[i + 1] && /^ {0,3}(?:=+|-+)\s*$/.test(lines[i + 1].text);
-    const title = h?.title ?? line.text.trim();
-    const isTitle = isBibliographyTitle(title);
-    if (isTitle) {
-      finishSection(line.from);
-      section = { from: line.from, level: h?.level ?? (setext && lines[i + 1].text.trim()[0] === '-' ? 2 : 1) };
-      if (setext && !h) i += 1;
-      continue;
+    const match = /(?:^|[ \t])\^([A-Za-z0-9-]+)[ \t]*$/.exec(line.text);
+    if (!match) continue;
+    const identity = referenceAnchor(match[1]);
+    if (!identity) continue;
+    const caret = match.index + match[0].indexOf('^');
+    const anchorOffset = line.from + caret;
+    if (rangeAt(anchorOffset, ignored)) {
+      if (indentation(line.text) < 4) continue;
+      // Recheck hard exclusions before accepting a list continuation that resembles code.
+      hardIgnored ??= ignoredMarkdownRanges(source, lines, false);
+      if (rangeAt(anchorOffset, hardIgnored)) continue;
     }
-    if (!section) continue;
-    const start = entryStart(line.text);
-    if (h && h.level <= section.level && !start) { finishSection(line.from); continue; }
-    if (start) {
-      const from = precedingAnchor?.from ?? line.from;
-      finishEntry(from);
-      current = { line, start, from, prefixAnchor: precedingAnchor?.text };
-      precedingAnchor = undefined;
-      // A preceding anchor belongs to this entry, not the previous one.
-      continue;
+    const standalone = !line.text.slice(0, caret).trim();
+    let last = standalone ? i - 1 : i;
+    while (last >= floor && !lines[last].text.trim()) last -= 1;
+    if (last < floor) continue;
+    if (standalone && blockBoundary(lines[last].text)) continue;
+    const first = entryFirstLine(lines, last, floor);
+    if (first === undefined) continue;
+    const from = lines[first].from;
+    const raw = source.slice(from, anchorOffset);
+    if (!raw.trim()) continue;
+    hardIgnored ??= ignoredMarkdownRanges(source, lines, false);
+    const contentFrom = from + (raw.match(/^\s*/)?.[0].length ?? 0);
+    const contentTo = anchorOffset - (raw.match(/\s*$/)?.[0].length ?? 0);
+    const blockedContent = rangeAt(contentFrom, hardIgnored);
+    if (blockedContent && blockedContent.to >= contentTo) continue;
+
+    const prefix = entryPrefix(lines[first].text);
+    const markdown = raw.slice(prefix?.length ?? 0).replace(/^(?: {1,4}|\t)(?=\S)/gm, '').trim();
+    if (!markdown) continue;
+    const to = anchorOffset + match[1].length + 1;
+    const anchor = `^${match[1]}`;
+    const entry: ReferenceEntry = { number: identity.number, markdown, from, to, line: lines[first].line, sectionId: identity.namespace, anchor };
+    let section = namespaces.get(identity.namespace);
+    if (!section) {
+      section = { id: identity.namespace, title: identity.namespace, from, to, entries: new Map(), duplicates: new Set() };
+      namespaces.set(identity.namespace, section);
+      result.sections.push(section);
     }
-    const anchorOnly = line.text.trim().replace(EMPTY_ANCHOR, '').trim() === '' && /<a\s/i.test(line.text);
-    if (anchorOnly) {
-      finishEntry(line.from);
-      precedingAnchor = { from: line.from, text: line.text };
-      continue;
+    section.to = to;
+    addNumber(entry, result);
+    addNumber(entry, section);
+    if (result.anchors.has(anchor) || result.duplicateAnchors.has(anchor)) {
+      result.duplicateAnchors.add(anchor);
+      result.anchors.delete(anchor);
+    } else {
+      result.anchors.set(anchor, entry);
     }
-    if (line.text.trim()) precedingAnchor = undefined;
+    result.referenceRanges.push({ from, to });
+    floor = i + 1;
   }
-  finishSection(source.length);
   return result;
 }
